@@ -7,10 +7,20 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use zediz_common::telemetry;
 
+mod agent;
 mod auth;
 mod config;
+mod credentials;
+mod crypto;
 mod db;
+mod deployments;
 mod error;
+mod nodes;
+mod projects;
+mod provisioner;
+mod scheduler;
+mod services;
+mod ssh_keys;
 mod state;
 mod workspaces;
 
@@ -25,13 +35,21 @@ struct Health {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    match dotenvy::dotenv() {
+        Ok(path) => eprintln!("loaded env from {}", path.display()),
+        Err(e) if e.not_found() => {}
+        Err(e) => eprintln!("warning: could not load .env: {e}"),
+    }
     telemetry::init("zediz-controlplane");
-    let config = Config::from_env().context("loading config")?;
+    let loaded = Config::from_env().context("loading config")?;
+    let config = loaded.config;
+    let master_key = loaded.master_key;
     let pool = db::connect(&config.database_url).await?;
     db::migrate(&pool).await?;
 
     let bind: SocketAddr = config.bind_addr;
-    let state = AppState::new(pool, config);
+    let state = AppState::new(pool, config, master_key);
+    scheduler::spawn(state.clone());
     let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(bind)
@@ -55,7 +73,14 @@ fn router(state: AppState) -> Router {
         )
         .nest("/auth", auth::routes::router())
         .merge(workspaces::routes::router())
-        .merge(workspaces::invites::router());
+        .merge(workspaces::invites::router())
+        .merge(credentials::routes::router())
+        .merge(ssh_keys::routes::router())
+        .merge(projects::routes::router())
+        .merge(services::routes::router())
+        .merge(nodes::routes::router())
+        .merge(deployments::routes::router())
+        .merge(agent::routes::router());
 
     Router::new()
         .nest("/api/v1", api)

@@ -43,6 +43,7 @@ time.workspace = true
 bytes.workspace = true
 once_cell.workspace = true
 clap.workspace = true
+dotenvy.workspace = true
 zediz-common.workspace = true
 zediz-proto.workspace = true
 zediz-hetzner.workspace = true

@@ -1,4 +1,6 @@
-use reqwest::Client;
+use std::time::Duration;
+
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -10,6 +12,10 @@ pub enum HetznerError {
     Http(#[from] reqwest::Error),
     #[error("api error {status}: {message}")]
     Api { status: u16, message: String },
+    #[error("action {id} failed: {error}")]
+    ActionFailed { id: i64, error: String },
+    #[error("timed out waiting for action {id}")]
+    ActionTimeout { id: i64 },
 }
 
 #[derive(Clone)]
@@ -23,38 +29,200 @@ impl HetznerClient {
         Self {
             http: Client::builder()
                 .user_agent(concat!("zediz/", env!("CARGO_PKG_VERSION")))
+                .timeout(Duration::from_secs(30))
                 .build()
                 .expect("reqwest client"),
             token: token.into(),
         }
     }
 
-    /// Validates the token by calling a cheap endpoint.
     pub async fn ping(&self) -> Result<(), HetznerError> {
+        self.get_json::<serde_json::Value>("/server_types?per_page=1")
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn list_server_types(&self) -> Result<Vec<ServerType>, HetznerError> {
+        let res: ServerTypesResponse = self.get_json("/server_types?per_page=50").await?;
+        Ok(res.server_types)
+    }
+
+    pub async fn list_locations(&self) -> Result<Vec<Location>, HetznerError> {
+        let res: LocationsResponse = self.get_json("/locations").await?;
+        Ok(res.locations)
+    }
+
+    pub async fn list_ssh_keys(&self) -> Result<Vec<SshKey>, HetznerError> {
+        let res: SshKeysResponse = self.get_json("/ssh_keys?per_page=50").await?;
+        Ok(res.ssh_keys)
+    }
+
+    /// Find SSH key by fingerprint, or upload it. Returns the Hetzner-side id.
+    pub async fn ensure_ssh_key(
+        &self,
+        name: &str,
+        public_key: &str,
+        fingerprint: &str,
+    ) -> Result<i64, HetznerError> {
+        let existing = self.list_ssh_keys().await?;
+        if let Some(k) = existing
+            .iter()
+            .find(|k| k.fingerprint.eq_ignore_ascii_case(fingerprint))
+        {
+            return Ok(k.id);
+        }
+        let body = serde_json::json!({
+            "name": name,
+            "public_key": public_key,
+        });
+        let created: CreateSshKeyResponse = self.post_json("/ssh_keys", &body).await?;
+        Ok(created.ssh_key.id)
+    }
+
+    pub async fn create_server(
+        &self,
+        req: &CreateServerRequest<'_>,
+    ) -> Result<CreateServerResponse, HetznerError> {
+        self.post_json("/servers", req).await
+    }
+
+    pub async fn get_server(&self, id: i64) -> Result<Server, HetznerError> {
+        let res: ServerResponse = self.get_json(&format!("/servers/{id}")).await?;
+        Ok(res.server)
+    }
+
+    pub async fn delete_server(&self, id: i64) -> Result<Action, HetznerError> {
         let res = self
             .http
-            .get(format!("{API_BASE}/server_types?per_page=1"))
+            .delete(format!("{API_BASE}/servers/{id}"))
             .bearer_auth(&self.token)
             .send()
             .await?;
-
-        if !res.status().is_success() {
-            let status = res.status().as_u16();
-            let message = res.text().await.unwrap_or_default();
-            return Err(HetznerError::Api { status, message });
+        let status = res.status();
+        if status == StatusCode::NOT_FOUND {
+            return Ok(Action {
+                id: 0,
+                status: "success".into(),
+                error: None,
+            });
         }
-        Ok(())
+        let text = res.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(HetznerError::Api {
+                status: status.as_u16(),
+                message: text,
+            });
+        }
+        let parsed: DeleteServerResponse =
+            serde_json::from_str(&text).map_err(|e| HetznerError::Api {
+                status: status.as_u16(),
+                message: format!("decode: {e}: {text}"),
+            })?;
+        Ok(parsed.action)
+    }
+
+    pub async fn get_action(&self, id: i64) -> Result<Action, HetznerError> {
+        let res: ActionResponse = self.get_json(&format!("/actions/{id}")).await?;
+        Ok(res.action)
+    }
+
+    /// Polls an action until it succeeds, fails, or the deadline elapses.
+    pub async fn wait_for_action(
+        &self,
+        id: i64,
+        timeout: Duration,
+    ) -> Result<Action, HetznerError> {
+        let start = std::time::Instant::now();
+        loop {
+            let action = self.get_action(id).await?;
+            match action.status.as_str() {
+                "success" => return Ok(action),
+                "error" => {
+                    return Err(HetznerError::ActionFailed {
+                        id,
+                        error: action.error.unwrap_or_else(|| "unknown".into()),
+                    });
+                }
+                _ => {}
+            }
+            if start.elapsed() >= timeout {
+                return Err(HetznerError::ActionTimeout { id });
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    }
+
+    async fn get_json<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, HetznerError> {
+        let res = self
+            .http
+            .get(format!("{API_BASE}{path}"))
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        self.parse(res).await
+    }
+
+    async fn post_json<B: Serialize + ?Sized, T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, HetznerError> {
+        let res = self
+            .http
+            .post(format!("{API_BASE}{path}"))
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await?;
+        self.parse(res).await
+    }
+
+    async fn parse<T: for<'de> Deserialize<'de>>(
+        &self,
+        res: reqwest::Response,
+    ) -> Result<T, HetznerError> {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(HetznerError::Api {
+                status: status.as_u16(),
+                message: text,
+            });
+        }
+        serde_json::from_str(&text).map_err(|e| HetznerError::Api {
+            status: status.as_u16(),
+            message: format!("decode: {e}: {text}"),
+        })
     }
 }
 
-// Minimal shapes — expand as we build out the provisioner.
+// ---------- types ----------
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ServerType {
     pub id: i64,
     pub name: String,
+    pub description: Option<String>,
     pub cores: u32,
+    /// RAM in GiB (Hetzner returns a float).
     pub memory: f32,
+    /// Disk in GB.
     pub disk: u32,
+    #[serde(default)]
+    pub prices: Vec<ServerTypePrice>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ServerTypePrice {
+    pub location: String,
+    pub price_hourly: Price,
+    pub price_monthly: Price,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Price {
+    pub net: String,
+    pub gross: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -62,6 +230,7 @@ pub struct Location {
     pub id: i64,
     pub name: String,
     pub country: String,
+    pub city: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,4 +239,168 @@ pub struct SshKey {
     pub name: String,
     pub fingerprint: String,
     pub public_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateServerRequest<'a> {
+    pub name: &'a str,
+    pub server_type: &'a str,
+    pub image: &'a str,
+    pub location: &'a str,
+    pub ssh_keys: Vec<i64>,
+    pub user_data: &'a str,
+    pub start_after_create: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateServerResponse {
+    pub server: Server,
+    pub action: Action,
+    #[serde(default)]
+    pub root_password: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Server {
+    pub id: i64,
+    pub name: String,
+    pub status: String,
+    #[serde(default)]
+    pub public_net: PublicNet,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PublicNet {
+    #[serde(default)]
+    pub ipv4: Option<PublicNetIpv4>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PublicNetIpv4 {
+    pub ip: String,
+}
+
+#[derive(Debug)]
+pub struct Action {
+    pub id: i64,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ServerResponse {
+    server: Server,
+}
+
+#[derive(Deserialize)]
+struct DeleteServerResponse {
+    action: Action,
+}
+
+#[derive(Deserialize)]
+struct ActionResponse {
+    action: Action,
+}
+
+#[derive(Deserialize)]
+struct ServerTypesResponse {
+    server_types: Vec<ServerType>,
+}
+
+#[derive(Deserialize)]
+struct LocationsResponse {
+    locations: Vec<Location>,
+}
+
+#[derive(Deserialize)]
+struct SshKeysResponse {
+    ssh_keys: Vec<SshKey>,
+}
+
+#[derive(Deserialize)]
+struct CreateSshKeyResponse {
+    ssh_key: SshKey,
+}
+
+impl<'de> Deserialize<'de> for Action {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Hetzner's "error" field is either null or an object `{code, message}`.
+        #[derive(Deserialize)]
+        struct Raw {
+            id: i64,
+            status: String,
+            error: Option<RawError>,
+        }
+        #[derive(Deserialize)]
+        struct RawError {
+            #[serde(default)]
+            code: Option<String>,
+            #[serde(default)]
+            message: Option<String>,
+        }
+        let raw = Raw::deserialize(d)?;
+        let error = raw.error.map(|e| {
+            format!(
+                "{}: {}",
+                e.code.unwrap_or_else(|| "error".into()),
+                e.message.unwrap_or_default()
+            )
+        });
+        Ok(Action {
+            id: raw.id,
+            status: raw.status,
+            error,
+        })
+    }
+}
+
+impl Serialize for Action {
+    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("Action", 3)?;
+        st.serialize_field("id", &self.id)?;
+        st.serialize_field("status", &self.status)?;
+        st.serialize_field("error", &self.error)?;
+        st.end()
+    }
+}
+
+/// Pick the cheapest server_type that meets the required resources in the given location.
+/// Returns the server_type name (e.g. "cx22").
+pub fn pick_server_type<'a>(
+    server_types: &'a [ServerType],
+    location: &str,
+    required_cpu_millis: u32,
+    required_memory_mb: u32,
+    required_disk_mb: u32,
+) -> Option<&'a ServerType> {
+    let required_cores = (required_cpu_millis as f32 / 1000.0).ceil() as u32;
+    let required_mem_gib = (required_memory_mb as f32 / 1024.0).ceil();
+    let required_disk_gb = (required_disk_mb as f32 / 1024.0).ceil() as u32;
+
+    let mut candidates: Vec<(&ServerType, f32)> = server_types
+        .iter()
+        .filter(|t| {
+            t.cores >= required_cores.max(1)
+                && t.memory >= required_mem_gib.max(0.5)
+                && t.disk >= required_disk_gb.max(10)
+                && t.prices.iter().any(|p| p.location == location)
+        })
+        .filter_map(|t| {
+            let price = t.prices.iter().find(|p| p.location == location)?;
+            let monthly: f32 = price.price_monthly.gross.parse().ok()?;
+            Some((t, monthly))
+        })
+        .collect();
+
+    candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.into_iter().next().map(|(t, _)| t)
 }

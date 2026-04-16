@@ -1,0 +1,456 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Utc};
+use serde_json::{json, Value as JsonValue};
+use sqlx::PgPool;
+use tokio::sync::Notify;
+
+use crate::agent::commands::{self, CommandKind};
+use crate::credentials;
+use crate::provisioner::hetzner as hetzner_provisioner;
+use crate::services::{PortMap, Resources};
+use crate::ssh_keys;
+use crate::state::AppState;
+
+/// Handle used to nudge the scheduler to wake early when new work arrives.
+#[derive(Clone, Default)]
+pub struct SchedulerHandle {
+    notify: Arc<Notify>,
+}
+
+impl SchedulerHandle {
+    pub fn wake(&self) {
+        self.notify.notify_one();
+    }
+
+    async fn wait(&self, tick: Duration) {
+        tokio::select! {
+            _ = tokio::time::sleep(tick) => {}
+            _ = self.notify.notified() => {}
+        }
+    }
+}
+
+pub fn nudge(state: &AppState) {
+    state.scheduler().wake();
+}
+
+pub fn spawn(state: AppState) -> SchedulerHandle {
+    let handle = state.scheduler().clone();
+    let handle_for_task = handle.clone();
+    let state_for_task = state.clone();
+    tokio::spawn(async move {
+        let tick = Duration::from_secs(2);
+        let mut autoscale_counter: u32 = 0;
+        loop {
+            if let Err(e) = tick_once(&state_for_task).await {
+                tracing::error!(error = ?e, "scheduler tick failed");
+            }
+            // Run autoscale-down every ~30 ticks (~60 seconds).
+            autoscale_counter = autoscale_counter.wrapping_add(1);
+            if autoscale_counter.is_multiple_of(30) {
+                if let Err(e) = autoscale_down(&state_for_task).await {
+                    tracing::warn!(error = ?e, "autoscale-down failed");
+                }
+            }
+            handle_for_task.wait(tick).await;
+        }
+    });
+    handle
+}
+
+async fn tick_once(state: &AppState) -> Result<()> {
+    let pending = fetch_pending(state.pool()).await?;
+    for p in pending {
+        if let Err(e) = place_and_run(state, &p).await {
+            tracing::error!(deployment = %p.deployment_id, error = ?e, "placement failed");
+            let _ = sqlx::query(
+                "UPDATE deployments SET status = 'errored', reason = $1, updated_at = now() \
+                 WHERE id = $2",
+            )
+            .bind(e.to_string())
+            .bind(&p.deployment_id)
+            .execute(state.pool())
+            .await;
+        }
+    }
+    refresh_idle_since(state.pool()).await?;
+    Ok(())
+}
+
+struct PendingDeployment {
+    deployment_id: String,
+    workspace_id: String,
+    image: String,
+    env_vars: BTreeMap<String, String>,
+    ports: Vec<PortMap>,
+    resources: Resources,
+}
+
+async fn fetch_pending(pool: &PgPool) -> Result<Vec<PendingDeployment>> {
+    let rows: Vec<(String, String, String, JsonValue, JsonValue, JsonValue)> = sqlx::query_as(
+        "SELECT d.id, w.id, d.image_ref, d.env_vars, d.ports, d.resources \
+         FROM deployments d \
+         JOIN services s ON s.id = d.service_id \
+         JOIN projects p ON p.id = s.project_id \
+         JOIN workspaces w ON w.id = p.workspace_id \
+         WHERE d.status IN ('pending', 'placing') \
+         ORDER BY d.created_at ASC \
+         LIMIT 20",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for (deployment_id, workspace_id, image, env, ports, resources) in rows {
+        let env_vars: BTreeMap<String, String> =
+            serde_json::from_value(env).map_err(|e| anyhow!("bad env_vars json: {e}"))?;
+        let ports: Vec<PortMap> =
+            serde_json::from_value(ports).map_err(|e| anyhow!("bad ports json: {e}"))?;
+        let resources: Resources =
+            serde_json::from_value(resources).map_err(|e| anyhow!("bad resources json: {e}"))?;
+        out.push(PendingDeployment {
+            deployment_id,
+            workspace_id,
+            image,
+            env_vars,
+            ports,
+            resources,
+        });
+    }
+    Ok(out)
+}
+
+#[derive(sqlx::FromRow)]
+struct NodeCapacity {
+    id: String,
+    provider: String,
+    total_cpu_millis: i32,
+    total_memory_mb: i32,
+    total_disk_mb: i32,
+    used_cpu_millis: Option<i64>,
+    used_memory_mb: Option<i64>,
+    used_disk_mb: Option<i64>,
+}
+
+/// First-fit-decreasing by free memory. Ready nodes only.
+async fn pick_node(
+    pool: &PgPool,
+    workspace_id: &str,
+    need: &Resources,
+) -> Result<Option<NodeCapacity>> {
+    let rows: Vec<NodeCapacity> = sqlx::query_as(
+        "SELECT n.id, n.provider, n.total_cpu_millis, n.total_memory_mb, n.total_disk_mb, \
+                COALESCE(SUM(a.cpu_millis), 0)::bigint AS used_cpu_millis, \
+                COALESCE(SUM(a.memory_mb), 0)::bigint AS used_memory_mb, \
+                COALESCE(SUM(a.disk_mb), 0)::bigint AS used_disk_mb \
+         FROM nodes n \
+         LEFT JOIN node_allocations a ON a.node_id = n.id \
+         WHERE n.workspace_id = $1 AND n.status = 'ready' \
+         GROUP BY n.id \
+         ORDER BY n.created_at ASC",
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut fits: Vec<(NodeCapacity, i64)> = rows
+        .into_iter()
+        .filter_map(|row| {
+            let free_cpu = row.total_cpu_millis as i64 - row.used_cpu_millis.unwrap_or(0);
+            let free_mem = row.total_memory_mb as i64 - row.used_memory_mb.unwrap_or(0);
+            let free_disk = row.total_disk_mb as i64 - row.used_disk_mb.unwrap_or(0);
+            if free_cpu >= need.cpu_millis as i64
+                && free_mem >= need.memory_mb as i64
+                && free_disk >= need.disk_mb as i64
+            {
+                Some((row, free_mem))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // FFD: pick the node with *smallest* free memory that still fits — pack tight.
+    fits.sort_by_key(|(_, free_mem)| *free_mem);
+    Ok(fits.into_iter().next().map(|(n, _)| n))
+}
+
+async fn place_and_run(state: &AppState, p: &PendingDeployment) -> Result<()> {
+    let picked = pick_node(state.pool(), &p.workspace_id, &p.resources).await?;
+    let node = match picked {
+        Some(n) => n,
+        None => {
+            let outcome = try_provision_for(state, &p.workspace_id, &p.resources).await?;
+            let reason = match outcome {
+                ProvisionOutcome::Provisioning => {
+                    "waiting for provisioned node to register".to_string()
+                }
+                ProvisionOutcome::Skipped(msg) => msg,
+            };
+            sqlx::query(
+                "UPDATE deployments SET status = 'placing', reason = $1, updated_at = now() \
+                 WHERE id = $2",
+            )
+            .bind(&reason)
+            .bind(&p.deployment_id)
+            .execute(state.pool())
+            .await?;
+            return Ok(());
+        }
+    };
+
+    // Reserve capacity atomically.
+    let mut tx = state.pool().begin().await?;
+    sqlx::query(
+        "INSERT INTO node_allocations (node_id, deployment_id, cpu_millis, memory_mb, disk_mb) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (node_id, deployment_id) DO NOTHING",
+    )
+    .bind(&node.id)
+    .bind(&p.deployment_id)
+    .bind(p.resources.cpu_millis as i32)
+    .bind(p.resources.memory_mb as i32)
+    .bind(p.resources.disk_mb as i32)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE deployments SET node_id = $1, status = 'pulling', reason = NULL, updated_at = now() \
+         WHERE id = $2",
+    )
+    .bind(&node.id)
+    .bind(&p.deployment_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    // Only Hetzner agents run containers — local placements are intentionally gone.
+    match node.provider.as_str() {
+        "hetzner" => dispatch_to_agent(state, &node.id, p).await,
+        other => Err(anyhow!("unsupported node provider: {other}")),
+    }
+}
+
+async fn dispatch_to_agent(state: &AppState, node_id: &str, p: &PendingDeployment) -> Result<()> {
+    let payload = commands::pull_and_run_payload(
+        &p.image,
+        &json!(p.env_vars),
+        &json!(p.ports),
+        p.resources.cpu_millis,
+        p.resources.memory_mb,
+    );
+    commands::enqueue(
+        state.pool(),
+        node_id,
+        Some(&p.deployment_id),
+        CommandKind::PullAndRun,
+        payload,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Outcome of `try_provision_for`. `Skipped`/`Provisioning` land in the
+/// deployment's `reason` column so users can see why they're waiting.
+pub enum ProvisionOutcome {
+    Provisioning,
+    Skipped(String),
+}
+
+/// Decide whether to provision a new Hetzner node for `need`. Returns the
+/// outcome along with a human-readable reason.
+async fn try_provision_for(
+    state: &AppState,
+    workspace_id: &str,
+    need: &Resources,
+) -> Result<ProvisionOutcome> {
+    #[derive(sqlx::FromRow)]
+    struct WsSettings {
+        hetzner_location: String,
+        max_nodes: i32,
+        scheduler_paused_until: Option<DateTime<Utc>>,
+    }
+
+    let ws: Option<WsSettings> = sqlx::query_as(
+        "SELECT hetzner_location, max_nodes, scheduler_paused_until \
+         FROM workspaces WHERE id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_optional(state.pool())
+    .await?;
+    let Some(ws) = ws else {
+        return Ok(ProvisionOutcome::Skipped(
+            "workspace settings missing".into(),
+        ));
+    };
+
+    if let Some(until) = ws.scheduler_paused_until {
+        let remaining = until - Utc::now();
+        if remaining.num_seconds() > 0 {
+            return Ok(ProvisionOutcome::Skipped(format!(
+                "scheduler paused for {}s (after a manual node delete); retry by restarting the deployment",
+                remaining.num_seconds()
+            )));
+        }
+    }
+
+    // Don't pile up parallel provisions — one at a time.
+    let (in_flight,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)::bigint FROM nodes \
+         WHERE workspace_id = $1 AND provider = 'hetzner' \
+               AND status IN ('provisioning', 'draining')",
+    )
+    .bind(workspace_id)
+    .fetch_one(state.pool())
+    .await?;
+    if in_flight > 0 {
+        return Ok(ProvisionOutcome::Skipped(format!(
+            "a node is already provisioning ({in_flight} in-flight); waiting for it to register"
+        )));
+    }
+
+    let (current_nodes,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)::bigint FROM nodes \
+         WHERE workspace_id = $1 AND provider = 'hetzner' AND status <> 'terminated'",
+    )
+    .bind(workspace_id)
+    .fetch_one(state.pool())
+    .await?;
+    if current_nodes >= ws.max_nodes as i64 {
+        return Ok(ProvisionOutcome::Skipped(format!(
+            "max_nodes reached ({current_nodes}/{cap}) — raise the cap in Settings",
+            cap = ws.max_nodes
+        )));
+    }
+
+    let token = match credentials::first_hetzner_token(
+        state.pool(),
+        state.master_key(),
+        workspace_id,
+    )
+    .await
+    .context("fetching Hetzner token")?
+    {
+        Some(t) => t,
+        None => {
+            return Ok(ProvisionOutcome::Skipped(
+                "no Hetzner API token credential in this workspace".into(),
+            ));
+        }
+    };
+
+    let ssh_key_ids = ensure_workspace_ssh_keys(state.pool(), workspace_id, &token).await?;
+
+    let result = hetzner_provisioner::provision(
+        state.pool(),
+        state.config(),
+        state.master_key(),
+        &token,
+        workspace_id,
+        &ws.hetzner_location,
+        hetzner_provisioner::NodeSize::Fit(need),
+        ssh_key_ids,
+    )
+    .await?;
+    tracing::info!(
+        workspace = %workspace_id,
+        node = %result.node_id,
+        server = result.hetzner_server_id,
+        "provisioned hetzner node"
+    );
+    Ok(ProvisionOutcome::Provisioning)
+}
+
+async fn ensure_workspace_ssh_keys(
+    pool: &PgPool,
+    workspace_id: &str,
+    hetzner_token: &str,
+) -> Result<Vec<i64>> {
+    let keys = ssh_keys::list_for_sync(pool, workspace_id).await?;
+    if keys.is_empty() {
+        return Ok(vec![]);
+    }
+    let client = zediz_hetzner::HetznerClient::new(hetzner_token);
+    let mut out = Vec::with_capacity(keys.len());
+    for k in keys {
+        match client
+            .ensure_ssh_key(&k.name, &k.public_key, &k.fingerprint)
+            .await
+        {
+            Ok(id) => out.push(id),
+            Err(e) => tracing::warn!(error = ?e, ssh_key = %k.id, "ensure ssh key on hetzner"),
+        }
+    }
+    Ok(out)
+}
+
+/// Update `idle_since_at` on nodes: stamp when allocations first drop to zero; clear when non-zero.
+async fn refresh_idle_since(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "UPDATE nodes SET idle_since_at = CASE \
+            WHEN (SELECT COUNT(*) FROM node_allocations a WHERE a.node_id = nodes.id) = 0 \
+                AND idle_since_at IS NULL AND status = 'ready' \
+            THEN now() \
+            WHEN (SELECT COUNT(*) FROM node_allocations a WHERE a.node_id = nodes.id) > 0 \
+            THEN NULL \
+            ELSE idle_since_at \
+         END",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Terminate Hetzner nodes that have been idle longer than their workspace's
+/// `autoscale_idle_ttl_seconds` and aren't flagged `persistent`.
+async fn autoscale_down(state: &AppState) -> Result<()> {
+    #[derive(sqlx::FromRow)]
+    struct Candidate {
+        id: String,
+        workspace_id: String,
+        hetzner_server_id: Option<i64>,
+        idle_since_at: Option<DateTime<Utc>>,
+        ttl_seconds: i32,
+    }
+
+    let rows: Vec<Candidate> = sqlx::query_as(
+        "SELECT n.id, n.workspace_id, n.hetzner_server_id, n.idle_since_at, \
+                w.autoscale_idle_ttl_seconds AS ttl_seconds \
+         FROM nodes n \
+         JOIN workspaces w ON w.id = n.workspace_id \
+         WHERE n.provider = 'hetzner' \
+               AND n.status = 'ready' \
+               AND n.persistent = FALSE \
+               AND n.idle_since_at IS NOT NULL",
+    )
+    .fetch_all(state.pool())
+    .await?;
+
+    let now = Utc::now();
+    for c in rows {
+        let Some(idle_since) = c.idle_since_at else {
+            continue;
+        };
+        if (now - idle_since).num_seconds() < c.ttl_seconds as i64 {
+            continue;
+        }
+        let Some(server_id) = c.hetzner_server_id else {
+            continue;
+        };
+        let token =
+            credentials::first_hetzner_token(state.pool(), state.master_key(), &c.workspace_id)
+                .await?;
+        let Some(token) = token else { continue };
+
+        tracing::info!(node = %c.id, "autoscale-down: terminating idle hetzner node");
+        if let Err(e) = hetzner_provisioner::terminate(state.pool(), &token, &c.id, server_id).await
+        {
+            tracing::warn!(error = ?e, node = %c.id, "terminate failed");
+        }
+    }
+    Ok(())
+}

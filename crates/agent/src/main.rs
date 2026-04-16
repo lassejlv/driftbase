@@ -1,11 +1,19 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
+use std::time::Duration;
 use zediz_common::telemetry;
+
+mod client;
+mod docker;
+mod executor;
+
+use crate::client::ControlPlaneClient;
+use crate::docker::DockerExec;
 
 #[derive(Parser, Debug)]
 #[command(name = "zediz-agent", version, about = "Zediz node agent")]
 struct Args {
-    /// URL of the control plane (e.g. https://cp.zediz.example)
+    /// URL of the control plane (e.g. https://cp.zediz.example).
     #[arg(long, env = "ZEDIZ_CONTROL_PLANE_URL")]
     control_plane_url: String,
 
@@ -13,17 +21,75 @@ struct Args {
     #[arg(long, env = "ZEDIZ_BOOTSTRAP_TOKEN")]
     bootstrap_token: Option<String>,
 
-    /// Persistent node token (replaces bootstrap after first register).
+    /// Persistent node token (skips registration if supplied).
     #[arg(long, env = "ZEDIZ_NODE_TOKEN")]
     node_token: Option<String>,
+
+    /// Override reported hostname (defaults to OS hostname).
+    #[arg(long, env = "ZEDIZ_NODE_HOSTNAME")]
+    hostname: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    match dotenvy::dotenv() {
+        Ok(path) => eprintln!("loaded env from {}", path.display()),
+        Err(e) if e.not_found() => {}
+        Err(e) => eprintln!("warning: could not load .env: {e}"),
+    }
     telemetry::init("zediz-agent");
     let args = Args::parse();
 
-    tracing::info!(cp = %args.control_plane_url, "agent starting");
-    // TODO (phase 3): register with CP, open WS, reconcile loop.
-    Ok(())
+    let client = ControlPlaneClient::new(&args.control_plane_url);
+
+    let (node_token, node_id) = if let Some(tok) = args.node_token.clone() {
+        tracing::info!("using pre-issued node token");
+        // We still need a node_id to log against; we'll learn it from first heartbeat response,
+        // but for now the token itself carries the identity server-side. Pass empty locally.
+        (tok, String::new())
+    } else {
+        let bootstrap = args
+            .bootstrap_token
+            .clone()
+            .context("ZEDIZ_BOOTSTRAP_TOKEN or ZEDIZ_NODE_TOKEN is required")?;
+        let host = args
+            .hostname
+            .clone()
+            .unwrap_or_else(|| hostname().unwrap_or_else(|| "zediz-node".into()));
+        let specs = host_resources();
+        let resp = client
+            .register(&bootstrap, &host, specs.0, specs.1, specs.2)
+            .await
+            .context("registering with control plane")?;
+        tracing::info!(node = %resp.node_id, "registered");
+        (resp.node_token, resp.node_id)
+    };
+
+    let docker = DockerExec::connect().context("connecting to local docker")?;
+
+    let heartbeat_interval = Duration::from_secs(10);
+    let mut exec = executor::Executor::new(client, docker, node_token, node_id);
+    loop {
+        if let Err(e) = exec.tick().await {
+            tracing::warn!(error = ?e, "agent tick failed");
+        }
+        tokio::time::sleep(heartbeat_interval).await;
+    }
+}
+
+fn hostname() -> Option<String> {
+    std::env::var("HOSTNAME").ok().or_else(|| {
+        std::fs::read_to_string("/etc/hostname")
+            .ok()
+            .map(|s| s.trim().into())
+    })
+}
+
+/// Returns `(cpu_millis, memory_mb, disk_mb)` derived from the host.
+/// Simplified; a real agent reads /proc/meminfo and df.
+fn host_resources() -> (i32, i32, i32) {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1) as i32;
+    (cpus * 1000, 4096, 50 * 1024)
 }

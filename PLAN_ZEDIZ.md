@@ -360,27 +360,29 @@ w/$workspaceSlug/
 - [x] Frontend: login/signup/invite pages, workspace switcher, member management
 
 ### Phase 2 — Credentials & SSH keys
-- [ ] AES-GCM crypto module with key loading
-- [ ] Hetzner API token + SSH key CRUD
-- [ ] Validate token on save (call `GET /servers` with it)
-- [ ] UI forms with masked reveal
+- [x] AES-GCM crypto module with key loading
+- [x] Hetzner API token + SSH key CRUD
+- [x] Validate token on save (call `GET /servers` with it)
+- [x] UI forms with masked reveal
 
 ### Phase 3 — Projects, services, manual image deploys
-- [ ] Projects + services (image-only) CRUD
-- [ ] `deployments` table, state machine
-- [ ] `CloudProvider` trait + `LocalDocker` impl
-- [ ] Agent MVP: register, heartbeat, pull+run, stop, status
-- [ ] Scheduler MVP: place on any ready node, no autoscale
-- [ ] Deploy button end-to-end against LocalDocker
-- [ ] Log streaming (SSE)
+- [x] Projects + services (image-only) CRUD
+- [x] `deployments` table, state machine
+- [x] `CloudProvider` trait + `LocalDocker` impl
+- [x] Agent MVP: register, heartbeat, pull+run, stop, status _(shipped in Phase 4 as an HTTP-polling agent)_
+- [x] Scheduler MVP: place on any ready node, no autoscale
+- [x] Deploy button end-to-end against LocalDocker
+- [x] Log streaming (SSE)
 
 ### Phase 4 — Hetzner provisioner + autoscale
-- [ ] `HetznerCloudProvider` impl
-- [ ] cloud-init template, bootstrap token
-- [ ] Provision → register → ready flow
-- [ ] Bin-packing scheduler, autoscale-down cron
-- [ ] Node list UI, drain action
-- [ ] Per-workspace caps
+- [x] `HetznerCloudProvider` impl _(implemented as scheduler branching on `node.provider` + `agent_commands` queue — simpler than a second CloudProvider trait impl with different semantics)_
+- [x] cloud-init template, bootstrap token _(HMAC-signed opaque tokens; cloud-init installs docker + agent + systemd unit)_
+- [x] Provision → register → ready flow _(provisioner inserts `provisioning` row, Hetzner create_server with cloud-init, agent registers with bootstrap token, status flips to `ready`)_
+- [x] Bin-packing scheduler, autoscale-down cron _(first-fit-decreasing by free memory; 60s autoscale-down loop respects per-workspace `autoscale_idle_ttl_seconds` and `persistent` flag)_
+- [x] Node list UI, drain action _(drain + delete buttons on `/nodes`; Hetzner delete terminates the VM)_
+- [x] Per-workspace caps _(`max_nodes`, `max_monthly_euro`, default location/server type; editable in Settings)_
+
+**Agent protocol note**: Phase 4 ships an HTTP-polling agent (register → heartbeat every 10s → executes commands → posts status). WebSocket upgrade deferred to a later polish phase.
 
 ### Phase 5 — Registry + git builds
 - [ ] Self-hosted registry deployment playbook

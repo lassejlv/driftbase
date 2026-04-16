@@ -31,6 +31,30 @@ export function useCreateWorkspace() {
   });
 }
 
+export interface UpdateWorkspaceInput {
+  name?: string;
+  hetzner_location?: string;
+  default_server_type?: string;
+  max_nodes?: number;
+  max_monthly_euro?: number;
+  autoscale_idle_ttl_seconds?: number;
+}
+
+export function useUpdateWorkspace(slug: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: UpdateWorkspaceInput) =>
+      api<WorkspaceSummary>(`/workspaces/${encodeURIComponent(slug)}`, {
+        method: 'PATCH',
+        body: input,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['workspace', slug] });
+      qc.invalidateQueries({ queryKey: workspacesQuery.queryKey });
+    },
+  });
+}
+
 export function membersQuery(slug: string) {
   return queryOptions({
     queryKey: ['workspace', slug, 'members'] as const,

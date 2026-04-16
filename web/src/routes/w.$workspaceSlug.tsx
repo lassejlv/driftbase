@@ -1,4 +1,10 @@
-import { createFileRoute, Link, Outlet, redirect } from '@tanstack/react-router';
+import {
+  createFileRoute,
+  Link,
+  Outlet,
+  redirect,
+  useLocation,
+} from '@tanstack/react-router';
 import { meQuery } from '@/lib/auth';
 import { useWorkspaces, workspaceQuery } from '@/lib/workspaces';
 
@@ -15,6 +21,15 @@ function WorkspaceLayout() {
   const { workspaceSlug } = Route.useParams();
   const workspaces = useWorkspaces();
   const current = workspaces.data?.find((w) => w.slug === workspaceSlug);
+  const location = useLocation();
+
+  // Project detail pages have their own sidebar; don't nest ours inside.
+  const inProjectDetail = new RegExp(
+    `^/w/${escapeRegex(workspaceSlug)}/projects/[^/]+`,
+  ).test(location.pathname);
+  if (inProjectDetail) {
+    return <Outlet />;
+  }
 
   return (
     <div className="grid grid-cols-[220px_1fr] gap-8">
@@ -45,9 +60,34 @@ function WorkspaceLayout() {
         <nav className="flex flex-col gap-1 text-sm">
           <SidebarLink to="/w/$workspaceSlug" params={{ workspaceSlug }} label="Overview" exact />
           <SidebarLink
+            to="/w/$workspaceSlug/projects"
+            params={{ workspaceSlug }}
+            label="Projects"
+          />
+          <SidebarLink
+            to="/w/$workspaceSlug/nodes"
+            params={{ workspaceSlug }}
+            label="Nodes"
+          />
+          <SidebarLink
             to="/w/$workspaceSlug/members"
             params={{ workspaceSlug }}
             label="Members"
+          />
+          <SidebarLink
+            to="/w/$workspaceSlug/credentials"
+            params={{ workspaceSlug }}
+            label="Credentials"
+          />
+          <SidebarLink
+            to="/w/$workspaceSlug/ssh-keys"
+            params={{ workspaceSlug }}
+            label="SSH keys"
+          />
+          <SidebarLink
+            to="/w/$workspaceSlug/settings"
+            params={{ workspaceSlug }}
+            label="Settings"
           />
         </nav>
       </aside>
@@ -58,13 +98,24 @@ function WorkspaceLayout() {
   );
 }
 
+function escapeRegex(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function SidebarLink({
   to,
   params,
   label,
   exact,
 }: {
-  to: '/w/$workspaceSlug' | '/w/$workspaceSlug/members';
+  to:
+    | '/w/$workspaceSlug'
+    | '/w/$workspaceSlug/projects'
+    | '/w/$workspaceSlug/nodes'
+    | '/w/$workspaceSlug/members'
+    | '/w/$workspaceSlug/credentials'
+    | '/w/$workspaceSlug/ssh-keys'
+    | '/w/$workspaceSlug/settings';
   params: { workspaceSlug: string };
   label: string;
   exact?: boolean;

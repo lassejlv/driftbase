@@ -2,6 +2,8 @@ use std::net::SocketAddr;
 
 use anyhow::{anyhow, Context, Result};
 
+use crate::crypto::MasterKey;
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind_addr: SocketAddr,
@@ -10,8 +12,13 @@ pub struct Config {
     pub cookie_secure: bool,
 }
 
+pub struct LoadedConfig {
+    pub config: Config,
+    pub master_key: MasterKey,
+}
+
 impl Config {
-    pub fn from_env() -> Result<Self> {
+    pub fn from_env() -> Result<LoadedConfig> {
         let bind_addr = std::env::var("ZEDIZ_BIND_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:8080".into())
             .parse()
@@ -24,11 +31,19 @@ impl Config {
             .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
             .unwrap_or(false);
 
-        Ok(Self {
-            bind_addr,
-            database_url,
-            public_url,
-            cookie_secure,
+        let master_key_raw = std::env::var("ZEDIZ_MASTER_KEY")
+            .map_err(|_| anyhow!("ZEDIZ_MASTER_KEY is required (base64 of 32 bytes)"))?;
+        let master_key =
+            MasterKey::from_base64(&master_key_raw).context("loading ZEDIZ_MASTER_KEY")?;
+
+        Ok(LoadedConfig {
+            config: Self {
+                bind_addr,
+                database_url,
+                public_url,
+                cookie_secure,
+            },
+            master_key,
         })
     }
 }

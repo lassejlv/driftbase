@@ -13,7 +13,7 @@ use crate::workspaces::membership::{self, Role};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/workspaces", post(create).get(list))
-        .route("/workspaces/:slug", get(show))
+        .route("/workspaces/:slug", get(show).patch(update))
         .route("/workspaces/:slug/members", get(list_members))
         .route(
             "/workspaces/:slug/members/:user_id",
@@ -34,6 +34,16 @@ pub struct WorkspaceSummary {
     pub name: String,
     pub role: Role,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub hetzner_location: Option<String>,
+    #[serde(default)]
+    pub default_server_type: Option<String>,
+    #[serde(default)]
+    pub max_nodes: Option<i32>,
+    #[serde(default)]
+    pub max_monthly_euro: Option<i32>,
+    #[serde(default)]
+    pub autoscale_idle_ttl_seconds: Option<i32>,
 }
 
 async fn create(
@@ -83,6 +93,11 @@ async fn create(
         name,
         role: Role::Owner,
         created_at: Utc::now(),
+        hetzner_location: Some("nbg1".into()),
+        default_server_type: None,
+        max_nodes: Some(3),
+        max_monthly_euro: Some(50),
+        autoscale_idle_ttl_seconds: Some(600),
     }))
 }
 
@@ -110,10 +125,49 @@ async fn list(
                     name,
                     role: role.parse().ok()?,
                     created_at,
+                    hetzner_location: None,
+                    default_server_type: None,
+                    max_nodes: None,
+                    max_monthly_euro: None,
+                    autoscale_idle_ttl_seconds: None,
                 })
             })
             .collect(),
     ))
+}
+
+#[derive(sqlx::FromRow)]
+struct WorkspaceRow {
+    id: String,
+    slug: String,
+    name: String,
+    role: String,
+    created_at: DateTime<Utc>,
+    hetzner_location: String,
+    default_server_type: Option<String>,
+    max_nodes: i32,
+    max_monthly_euro: i32,
+    autoscale_idle_ttl_seconds: i32,
+}
+
+impl WorkspaceRow {
+    fn into_summary(self) -> ApiResult<WorkspaceSummary> {
+        Ok(WorkspaceSummary {
+            id: self
+                .id
+                .parse()
+                .map_err(|e| ApiError::Internal(anyhow::anyhow!("{e}")))?,
+            slug: self.slug,
+            name: self.name,
+            role: self.role.parse().map_err(ApiError::Validation)?,
+            created_at: self.created_at,
+            hetzner_location: Some(self.hetzner_location),
+            default_server_type: self.default_server_type,
+            max_nodes: Some(self.max_nodes),
+            max_monthly_euro: Some(self.max_monthly_euro),
+            autoscale_idle_ttl_seconds: Some(self.autoscale_idle_ttl_seconds),
+        })
+    }
 }
 
 async fn show(
@@ -121,8 +175,10 @@ async fn show(
     auth: AuthUser,
     Path(slug): Path<String>,
 ) -> ApiResult<Json<WorkspaceSummary>> {
-    let row: Option<(String, String, String, String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT w.id, w.slug, w.name, m.role, w.created_at \
+    let row: Option<WorkspaceRow> = sqlx::query_as(
+        "SELECT w.id, w.slug, w.name, m.role, w.created_at, \
+                w.hetzner_location, w.default_server_type, w.max_nodes, \
+                w.max_monthly_euro, w.autoscale_idle_ttl_seconds \
          FROM workspaces w \
          JOIN workspace_members m ON m.workspace_id = w.id \
          WHERE w.slug = $1 AND m.user_id = $2",
@@ -132,16 +188,86 @@ async fn show(
     .fetch_optional(state.pool())
     .await?;
 
-    let (id, slug, name, role, created_at) = row.ok_or(ApiError::NotFound)?;
-    Ok(Json(WorkspaceSummary {
-        id: id
-            .parse()
-            .map_err(|e| ApiError::Internal(anyhow::anyhow!("{e}")))?,
-        slug,
-        name,
-        role: role.parse().map_err(ApiError::Validation)?,
-        created_at,
-    }))
+    let row = row.ok_or(ApiError::NotFound)?;
+    Ok(Json(row.into_summary()?))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateWorkspaceRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub hetzner_location: Option<String>,
+    #[serde(default)]
+    pub default_server_type: Option<String>,
+    #[serde(default)]
+    pub max_nodes: Option<i32>,
+    #[serde(default)]
+    pub max_monthly_euro: Option<i32>,
+    #[serde(default)]
+    pub autoscale_idle_ttl_seconds: Option<i32>,
+}
+
+async fn update(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(slug): Path<String>,
+    Json(req): Json<UpdateWorkspaceRequest>,
+) -> ApiResult<Json<WorkspaceSummary>> {
+    let ctx = membership::resolve(state.pool(), &slug, &auth.user_id).await?;
+    membership::require(&ctx, Role::Admin)?;
+
+    if let Some(n) = req.max_nodes {
+        if !(1..=100).contains(&n) {
+            return Err(ApiError::Validation("max_nodes must be 1..=100".into()));
+        }
+    }
+    if let Some(e) = req.max_monthly_euro {
+        if e < 0 {
+            return Err(ApiError::Validation("max_monthly_euro must be >= 0".into()));
+        }
+    }
+    if let Some(t) = req.autoscale_idle_ttl_seconds {
+        if !(60..=86_400).contains(&t) {
+            return Err(ApiError::Validation(
+                "autoscale_idle_ttl_seconds must be 60..=86400".into(),
+            ));
+        }
+    }
+
+    sqlx::query(
+        "UPDATE workspaces SET \
+            name = COALESCE($1, name), \
+            hetzner_location = COALESCE($2, hetzner_location), \
+            default_server_type = COALESCE($3, default_server_type), \
+            max_nodes = COALESCE($4, max_nodes), \
+            max_monthly_euro = COALESCE($5, max_monthly_euro), \
+            autoscale_idle_ttl_seconds = COALESCE($6, autoscale_idle_ttl_seconds) \
+         WHERE id = $7",
+    )
+    .bind(req.name.as_deref())
+    .bind(req.hetzner_location.as_deref())
+    .bind(req.default_server_type.as_deref())
+    .bind(req.max_nodes)
+    .bind(req.max_monthly_euro)
+    .bind(req.autoscale_idle_ttl_seconds)
+    .bind(ctx.workspace_id.to_string())
+    .execute(state.pool())
+    .await?;
+
+    let row: WorkspaceRow = sqlx::query_as(
+        "SELECT w.id, w.slug, w.name, m.role, w.created_at, \
+                w.hetzner_location, w.default_server_type, w.max_nodes, \
+                w.max_monthly_euro, w.autoscale_idle_ttl_seconds \
+         FROM workspaces w \
+         JOIN workspace_members m ON m.workspace_id = w.id \
+         WHERE w.id = $1 AND m.user_id = $2",
+    )
+    .bind(ctx.workspace_id.to_string())
+    .bind(auth.user_id.to_string())
+    .fetch_one(state.pool())
+    .await?;
+    Ok(Json(row.into_summary()?))
 }
 
 #[derive(Serialize)]

@@ -13,6 +13,11 @@ export interface WorkspaceSummary {
   name: string;
   role: Role;
   created_at: string;
+  hetzner_location?: string | null;
+  default_server_type?: string | null;
+  max_nodes?: number | null;
+  max_monthly_euro?: number | null;
+  autoscale_idle_ttl_seconds?: number | null;
 }
 
 export interface MemberRow {
@@ -35,4 +40,104 @@ export interface InviteSummary {
 export interface CreatedInvite extends InviteSummary {
   token: string;
   accept_url: string;
+}
+
+export type CredentialKind = 'hetzner_api_token' | 'github_pat' | 'registry';
+
+export interface CredentialSummary {
+  id: string;
+  kind: CredentialKind;
+  name: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  last_used_at: string | null;
+}
+
+export interface SshKeySummary {
+  id: string;
+  name: string;
+  public_key: string;
+  fingerprint: string;
+  has_private_key: boolean;
+  hetzner_key_id: number | null;
+  created_at: string;
+}
+
+export interface ProjectSummary {
+  id: string;
+  slug: string;
+  name: string;
+  created_at: string;
+}
+
+export interface Resources {
+  cpu_millis: number;
+  memory_mb: number;
+  disk_mb: number;
+}
+
+export interface PortMap {
+  container_port: number;
+  host_port: number | null;
+  protocol: string;
+}
+
+export type EnvVars = Record<string, string>;
+
+export type RestartPolicy = 'no' | 'on-failure' | 'always';
+
+export interface ServiceSummary {
+  id: string;
+  slug: string;
+  name: string;
+  source: string;
+  image_ref: string | null;
+  env_vars: EnvVars;
+  ports: PortMap[];
+  resources: Resources;
+  replicas: number;
+  restart_policy: RestartPolicy;
+  created_at: string;
+  updated_at: string;
+}
+
+export type DeploymentStatus =
+  | 'pending'
+  | 'placing'
+  | 'pulling'
+  | 'starting'
+  | 'running'
+  | 'failing'
+  | 'stopped'
+  | 'errored';
+
+export interface DeploymentSummary {
+  id: string;
+  service_id: string;
+  node_id: string | null;
+  status: DeploymentStatus;
+  image_ref: string;
+  container_id: string | null;
+  reason: string | null;
+  created_at: string;
+  started_at: string | null;
+  stopped_at: string | null;
+  updated_at: string;
+}
+
+export interface NodeSummary {
+  id: string;
+  name: string;
+  provider: string;
+  status: string;
+  total_cpu_millis: number;
+  total_memory_mb: number;
+  total_disk_mb: number;
+  used_cpu_millis: number;
+  used_memory_mb: number;
+  used_disk_mb: number;
+  labels: Record<string, unknown>;
+  last_seen_at: string | null;
+  created_at: string;
 }
