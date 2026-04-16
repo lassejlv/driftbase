@@ -57,45 +57,71 @@ impl HetznerClient {
         Ok(res.ssh_keys)
     }
 
-    /// Find SSH key by fingerprint, or upload it. Returns the Hetzner-side id.
-    /// If the preferred name collides with an unrelated key already on Hetzner,
-    /// retry once with a fingerprint-suffixed name.
+    /// Find SSH key by fingerprint or public-key bytes, or upload it. Returns
+    /// the Hetzner-side id. Tolerates two Hetzner uniqueness quirks:
+    ///   * `name` collision: retry with a fingerprint-suffixed name.
+    ///   * `public_key` collision: the key is already there under another
+    ///     name (and our fingerprint format didn't match Hetzner's) — re-list
+    ///     and return the existing id.
     pub async fn ensure_ssh_key(
         &self,
         name: &str,
         public_key: &str,
         fingerprint: &str,
     ) -> Result<i64, HetznerError> {
+        let norm = normalize_public_key(public_key);
+
         let existing = self.list_ssh_keys().await?;
-        if let Some(k) = existing
+        if let Some(k) = existing.iter().find(|k| {
+            k.fingerprint.eq_ignore_ascii_case(fingerprint)
+                || normalize_public_key(&k.public_key) == norm
+        }) {
+            return Ok(k.id);
+        }
+
+        // Try with the user's name.
+        match self.post_create_ssh_key(name, public_key).await {
+            Ok(id) => return Ok(id),
+            Err(HetznerError::Api { status: 409, .. }) => {}
+            Err(e) => return Err(e),
+        }
+
+        // Retry with a suffixed name (handles name-only collisions).
+        let suffix = fingerprint_suffix(fingerprint);
+        let unique = format!("{name}-{suffix}");
+        match self.post_create_ssh_key(&unique, public_key).await {
+            Ok(id) => return Ok(id),
+            Err(HetznerError::Api { status: 409, .. }) => {}
+            Err(e) => return Err(e),
+        }
+
+        // Public-key bytes already exist under yet-another name — find it.
+        let fresh = self.list_ssh_keys().await?;
+        if let Some(k) = fresh
             .iter()
-            .find(|k| k.fingerprint.eq_ignore_ascii_case(fingerprint))
+            .find(|k| normalize_public_key(&k.public_key) == norm)
         {
             return Ok(k.id);
         }
 
+        Err(HetznerError::Api {
+            status: 409,
+            message: "SSH key conflicts with an existing Hetzner key but could not be located"
+                .into(),
+        })
+    }
+
+    async fn post_create_ssh_key(
+        &self,
+        name: &str,
+        public_key: &str,
+    ) -> Result<i64, HetznerError> {
         let body = serde_json::json!({
             "name": name,
             "public_key": public_key,
         });
-        match self
-            .post_json::<_, CreateSshKeyResponse>("/ssh_keys", &body)
-            .await
-        {
-            Ok(created) => Ok(created.ssh_key.id),
-            Err(HetznerError::Api { status: 409, .. }) => {
-                let suffix = fingerprint_suffix(fingerprint);
-                let unique = format!("{name}-{suffix}");
-                let body = serde_json::json!({
-                    "name": &unique,
-                    "public_key": public_key,
-                });
-                let created: CreateSshKeyResponse =
-                    self.post_json("/ssh_keys", &body).await?;
-                Ok(created.ssh_key.id)
-            }
-            Err(e) => Err(e),
-        }
+        let created: CreateSshKeyResponse = self.post_json("/ssh_keys", &body).await?;
+        Ok(created.ssh_key.id)
     }
 
     pub async fn create_server(
@@ -433,4 +459,13 @@ fn fingerprint_suffix(fingerprint: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric())
         .take(8)
         .collect()
+}
+
+/// Reduce an OpenSSH public key to `"<alg> <base64-body>"` so we can compare
+/// two strings byte-for-byte regardless of comment or trailing whitespace.
+fn normalize_public_key(key: &str) -> String {
+    let mut parts = key.split_whitespace();
+    let alg = parts.next().unwrap_or("");
+    let body = parts.next().unwrap_or("");
+    format!("{alg} {body}")
 }

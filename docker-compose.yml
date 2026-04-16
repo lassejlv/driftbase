@@ -1,21 +1,47 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: zediz-postgres
+  controlplane:
+    build:
+      context: .
+      dockerfile: Dockerfile.controlplane
+    image: zediz-controlplane:latest
     restart: unless-stopped
     environment:
-      POSTGRES_USER: zediz
-      POSTGRES_PASSWORD: zediz
-      POSTGRES_DB: zediz
+      ZEDIZ_BIND_ADDR: 0.0.0.0:8080
+      ZEDIZ_DATABASE_URL: ${ZEDIZ_DATABASE_URL:?ZEDIZ_DATABASE_URL is required}
+      ZEDIZ_MASTER_KEY: ${ZEDIZ_MASTER_KEY:?ZEDIZ_MASTER_KEY is required}
+      ZEDIZ_PUBLIC_URL: ${ZEDIZ_PUBLIC_URL:-https://zediz.dev}
+      ZEDIZ_COOKIE_SECURE: "true"
+      ZEDIZ_AGENT_IMAGE: ${ZEDIZ_AGENT_IMAGE:-ghcr.io/lassejlv/zediz-agent:latest}
+      RUST_LOG: ${RUST_LOG:-info}
+    expose:
+      - "8080"
+    networks:
+      - zediz
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: zediz-web:latest
+    restart: unless-stopped
+    depends_on:
+      - controlplane
     ports:
-      - "5432:5432"
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      CADDY_SITE: ${CADDY_SITE:-zediz.dev}
+      CADDY_EMAIL: ${CADDY_EMAIL:-admin@zediz.dev}
     volumes:
-      - zediz_pg_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U zediz"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - zediz
 
 volumes:
-  zediz_pg_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  zediz:

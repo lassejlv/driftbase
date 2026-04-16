@@ -1,0 +1,25 @@
+{
+	# Let's Encrypt account email — used for issuing certs. Override via
+	# CADDY_EMAIL in the compose env.
+	email {$CADDY_EMAIL:admin@zediz.dev}
+}
+
+{$CADDY_SITE:zediz.dev} {
+	encode gzip zstd
+
+	# Control plane API + SSE. `flush_interval -1` disables response buffering
+	# so /deployments/:id/logs streams in real time.
+	@api path /api/*
+	handle @api {
+		reverse_proxy controlplane:8080 {
+			flush_interval -1
+		}
+	}
+
+	# Static SPA — fall through to index.html so TanStack Router owns paths.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}
