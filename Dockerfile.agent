@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1.6
+
+FROM rust:1.94-slim-bookworm AS builder
+WORKDIR /build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Copy the workspace source and build just the agent binary.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates crates
+RUN cargo build --release -p zediz-agent \
+ && strip target/release/zediz-agent
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /build/target/release/zediz-agent /usr/local/bin/zediz-agent
+ENTRYPOINT ["/usr/local/bin/zediz-agent"]

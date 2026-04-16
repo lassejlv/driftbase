@@ -12,10 +12,8 @@ use crate::services::Resources;
 
 /// Default Hetzner image; cloud-init inside installs docker + agent.
 const DEFAULT_IMAGE: &str = "debian-12";
-const AGENT_GIT_REPO_ENV: &str = "ZEDIZ_AGENT_GIT_REPO";
-const AGENT_GIT_REF_ENV: &str = "ZEDIZ_AGENT_GIT_REF";
-const DEFAULT_AGENT_GIT_REPO: &str = "https://github.com/lassejlv/zediz.git";
-const DEFAULT_AGENT_GIT_REF: &str = "main";
+const AGENT_IMAGE_ENV: &str = "ZEDIZ_AGENT_IMAGE";
+const DEFAULT_AGENT_IMAGE: &str = "ghcr.io/lassejlv/zediz-agent:latest";
 
 /// Minimum headroom multiplier: provisioned node must fit 120% of need.
 const HEADROOM: f32 = 1.2;
@@ -102,15 +100,12 @@ pub async fn provision(
     let total_disk_mb = (st.disk * 1024) as i32;
 
     let name = format!("zediz-{}", &node_id.to_string()[..8]);
-    let git_repo = std::env::var(AGENT_GIT_REPO_ENV)
-        .unwrap_or_else(|_| DEFAULT_AGENT_GIT_REPO.to_string());
-    let git_ref =
-        std::env::var(AGENT_GIT_REF_ENV).unwrap_or_else(|_| DEFAULT_AGENT_GIT_REF.to_string());
+    let agent_image =
+        std::env::var(AGENT_IMAGE_ENV).unwrap_or_else(|_| DEFAULT_AGENT_IMAGE.to_string());
     let user_data = cloud_init::render(
         &config.public_url,
         &bootstrap,
-        &git_repo,
-        &git_ref,
+        &agent_image,
         &node_id.to_string(),
         workspace_id,
     );
