@@ -1,0 +1,44 @@
+[package]
+name = "zediz-controlplane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "zediz-controlplane"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+reqwest.workspace = true
+hyper.workspace = true
+http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+argon2.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+jsonwebtoken.workspace = true
+ulid.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+bytes.workspace = true
+once_cell.workspace = true
+clap.workspace = true
+zediz-common.workspace = true
+zediz-proto.workspace = true
+zediz-hetzner.workspace = true

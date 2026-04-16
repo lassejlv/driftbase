@@ -1,0 +1,40 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# sqlx offline cache
+.sqlx
+
+# Node / Bun
+node_modules
+.pnp
+.pnp.js
+dist
+dist-ssr
+.vite
+.turbo
+bun.lockb.bak
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Editors / OS
+.DS_Store
+.idea
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Generated
+web/src/routeTree.gen.ts
+
+# Secrets
+*.pem
+*.key
+!**/public_key.pem
+
+# Logs
+*.log

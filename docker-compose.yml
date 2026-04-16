@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: zediz-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zediz
+      POSTGRES_PASSWORD: zediz
+      POSTGRES_DB: zediz
+    ports:
+      - "5432:5432"
+    volumes:
+      - zediz_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zediz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  zediz_pg_data:

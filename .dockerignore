@@ -1,0 +1,9 @@
+target/
+node_modules/
+web/dist/
+web/node_modules/
+.git/
+.github/
+*.log
+.env
+.env.local
