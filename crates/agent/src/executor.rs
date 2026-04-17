@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::client::{CommandAck, ControlPlaneClient, HeartbeatBody, StatusBody};
-use crate::docker::{DockerExec, PortSpec, RunSpec};
+use crate::docker::{DockerExec, PortSpec, RegistryAuth, RunSpec};
 
 pub struct Executor {
     client: ControlPlaneClient,
@@ -316,6 +316,11 @@ fn parse_run_spec(deployment_id: &str, payload: &serde_json::Value) -> Result<Ru
         .and_then(|v| v.as_u64())
         .unwrap_or(256) as u32;
 
+    let registry: Option<RegistryAuth> = payload
+        .get("registry")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok());
+
     Ok(RunSpec {
         deployment_id: deployment_id.into(),
         image,
@@ -323,5 +328,6 @@ fn parse_run_spec(deployment_id: &str, payload: &serde_json::Value) -> Result<Ru
         ports,
         cpu_millis,
         memory_mb,
+        registry,
     })
 }

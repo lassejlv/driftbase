@@ -390,11 +390,27 @@ struct PendingDeployment {
     env_vars: BTreeMap<String, String>,
     ports: Vec<PortMap>,
     resources: Resources,
+    /// Service's registry_credential_id (if any). Threaded into the
+    /// PullAndRun payload so the agent's pull hits the CP auth proxy with
+    /// the right basic-auth creds.
+    registry_credential_id: Option<String>,
 }
 
 async fn fetch_pending(pool: &PgPool) -> Result<Vec<PendingDeployment>> {
-    let rows: Vec<(String, String, String, JsonValue, JsonValue, JsonValue)> = sqlx::query_as(
-        "SELECT d.id, w.id, d.image_ref, d.env_vars, d.ports, d.resources \
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        deployment_id: String,
+        workspace_id: String,
+        image: String,
+        env: JsonValue,
+        ports: JsonValue,
+        resources: JsonValue,
+        registry_credential_id: Option<String>,
+    }
+
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT d.id AS deployment_id, w.id AS workspace_id, d.image_ref AS image, \
+                d.env_vars AS env, d.ports, d.resources, s.registry_credential_id \
          FROM deployments d \
          JOIN services s ON s.id = d.service_id \
          JOIN projects p ON p.id = s.project_id \
@@ -407,20 +423,21 @@ async fn fetch_pending(pool: &PgPool) -> Result<Vec<PendingDeployment>> {
     .await?;
 
     let mut out = Vec::with_capacity(rows.len());
-    for (deployment_id, workspace_id, image, env, ports, resources) in rows {
+    for r in rows {
         let env_vars: BTreeMap<String, String> =
-            serde_json::from_value(env).map_err(|e| anyhow!("bad env_vars json: {e}"))?;
+            serde_json::from_value(r.env).map_err(|e| anyhow!("bad env_vars json: {e}"))?;
         let ports: Vec<PortMap> =
-            serde_json::from_value(ports).map_err(|e| anyhow!("bad ports json: {e}"))?;
+            serde_json::from_value(r.ports).map_err(|e| anyhow!("bad ports json: {e}"))?;
         let resources: Resources =
-            serde_json::from_value(resources).map_err(|e| anyhow!("bad resources json: {e}"))?;
+            serde_json::from_value(r.resources).map_err(|e| anyhow!("bad resources json: {e}"))?;
         out.push(PendingDeployment {
-            deployment_id,
-            workspace_id,
-            image,
+            deployment_id: r.deployment_id,
+            workspace_id: r.workspace_id,
+            image: r.image,
             env_vars,
             ports,
             resources,
+            registry_credential_id: r.registry_credential_id,
         });
     }
     Ok(out)
@@ -538,12 +555,42 @@ async fn place_and_run(state: &AppState, p: &PendingDeployment) -> Result<()> {
 }
 
 async fn dispatch_to_agent(state: &AppState, node_id: &str, p: &PendingDeployment) -> Result<()> {
+    // If the service references a registry credential, decrypt it and thread
+    // the (url, username, password) into the payload so bollard's create_image
+    // pulls with auth. Only meaningful for images in private registries
+    // (bundled or user-hosted). Failure to decrypt is fatal — better to error
+    // the deployment than to ship a broken command.
+    let registry_cred = match &p.registry_credential_id {
+        Some(id) => Some(
+            credentials::fetch_decrypted(
+                state.pool(),
+                state.master_key(),
+                &p.workspace_id,
+                id,
+            )
+            .await
+            .context("fetching registry credential for pull")?
+            .ok_or_else(|| anyhow!("registry credential {id} missing"))?,
+        ),
+        None => None,
+    };
+    let registry_auth = registry_cred.as_ref().and_then(|c| {
+        let url = c.metadata.get("url").and_then(|v| v.as_str())?;
+        let username = c.metadata.get("username").and_then(|v| v.as_str())?;
+        Some(RegistryAuth {
+            url,
+            username,
+            password: &c.secret,
+        })
+    });
+
     let payload = commands::pull_and_run_payload(
         &p.image,
         &json!(p.env_vars),
         &json!(p.ports),
         p.resources.cpu_millis,
         p.resources.memory_mb,
+        registry_auth.as_ref(),
     );
     commands::enqueue(
         state.pool(),

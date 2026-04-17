@@ -126,13 +126,18 @@ pub fn pull_and_run_payload(
     ports: &serde_json::Value,
     cpu_millis: u32,
     memory_mb: u32,
+    registry: Option<&RegistryAuth<'_>>,
 ) -> JsonValue {
+    let registry = registry.map(|r| {
+        json!({ "url": r.url, "username": r.username, "password": r.password })
+    });
     json!({
         "image": image,
         "env": env,
         "ports": ports,
         "cpu_millis": cpu_millis,
         "memory_mb": memory_mb,
+        "registry": registry,
     })
 }
 

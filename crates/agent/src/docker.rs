@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use bollard::auth::DockerCredentials;
 use bollard::container::{
     Config, CreateContainerOptions, LogOutput, LogsOptions, RemoveContainerOptions,
     StopContainerOptions,
@@ -8,9 +9,41 @@ use bollard::models::{HostConfig, PortBinding, RestartPolicy, RestartPolicyNameE
 use bollard::Docker;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::client::LogLineOut;
+
+/// Registry credentials carried inside build / pull-and-run command payloads.
+/// Shared by `crates/agent/src/build.rs` (for `docker login` during push) and
+/// `pull_and_run` (passed to bollard so the daemon pulls from the bundled
+/// registry with auth).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegistryAuth {
+    pub url: String,
+    pub username: String,
+    pub password: String,
+}
+
+impl RegistryAuth {
+    /// Bollard's `DockerCredentials` uses `serveraddress` for the registry
+    /// host. Our URL may have a scheme — strip it.
+    pub fn to_bollard(&self) -> DockerCredentials {
+        let host = self
+            .url
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string();
+        DockerCredentials {
+            username: Some(self.username.clone()),
+            password: Some(self.password.clone()),
+            serveraddress: Some(host),
+            ..Default::default()
+        }
+    }
+}
 
 const PREFIX: &str = "zediz-";
 
@@ -35,6 +68,7 @@ impl DockerExec {
 
     pub async fn pull_and_run(&self, spec: RunSpec) -> Result<String> {
         let (from_image, tag) = split_image_tag(&spec.image);
+        let credentials = spec.registry.as_ref().map(RegistryAuth::to_bollard);
         let mut stream = self.docker.create_image(
             Some(CreateImageOptions {
                 from_image,
@@ -42,7 +76,7 @@ impl DockerExec {
                 ..Default::default()
             }),
             None,
-            None,
+            credentials,
         );
         while let Some(event) = stream.next().await {
             if let Err(e) = event {
@@ -277,6 +311,9 @@ pub struct RunSpec {
     pub ports: Vec<PortSpec>,
     pub cpu_millis: u32,
     pub memory_mb: u32,
+    /// Private-registry auth for the pull. Only the bundled registry needs
+    /// this today (external registries for image services are still public).
+    pub registry: Option<RegistryAuth>,
 }
 
 #[derive(Debug, Clone)]

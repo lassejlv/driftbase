@@ -8,6 +8,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::client::{BuildStatusBody, ControlPlaneClient, LogLineOut};
+use crate::docker::RegistryAuth;
 
 /// Parsed build command payload from the control plane.
 #[derive(Debug, Deserialize)]
@@ -28,13 +29,6 @@ pub struct BuildSpec {
     pub github_pat: Option<String>,
     #[serde(default)]
     pub registry: Option<RegistryAuth>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RegistryAuth {
-    pub url: String,
-    pub username: String,
-    pub password: String,
 }
 
 /// BuildKit frontend image used to interpret a railpack-generated plan. This
