@@ -416,6 +416,7 @@ async fn fail_build(pool: &PgPool, build_id: &str, reason: &str) -> Result<()> {
 
 struct PendingDeployment {
     deployment_id: String,
+    service_id: String,
     workspace_id: String,
     image: String,
     env_vars: BTreeMap<String, String>,
@@ -431,6 +432,7 @@ async fn fetch_pending(pool: &PgPool) -> Result<Vec<PendingDeployment>> {
     #[derive(sqlx::FromRow)]
     struct Row {
         deployment_id: String,
+        service_id: String,
         workspace_id: String,
         image: String,
         env: JsonValue,
@@ -440,7 +442,7 @@ async fn fetch_pending(pool: &PgPool) -> Result<Vec<PendingDeployment>> {
     }
 
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT d.id AS deployment_id, w.id AS workspace_id, d.image_ref AS image, \
+        "SELECT d.id AS deployment_id, d.service_id, w.id AS workspace_id, d.image_ref AS image, \
                 d.env_vars AS env, d.ports, d.resources, s.registry_credential_id \
          FROM deployments d \
          JOIN services s ON s.id = d.service_id \
@@ -463,6 +465,7 @@ async fn fetch_pending(pool: &PgPool) -> Result<Vec<PendingDeployment>> {
             serde_json::from_value(r.resources).map_err(|e| anyhow!("bad resources json: {e}"))?;
         out.push(PendingDeployment {
             deployment_id: r.deployment_id,
+            service_id: r.service_id,
             workspace_id: r.workspace_id,
             image: r.image,
             env_vars,
@@ -529,8 +532,80 @@ async fn pick_node(
     Ok(fits.into_iter().next().map(|(n, _)| n))
 }
 
+async fn pick_preferred_node_for_domains(
+    pool: &PgPool,
+    service_id: &str,
+    deployment_id: &str,
+    workspace_id: &str,
+    need: &Resources,
+) -> Result<Option<NodeCapacity>> {
+    let has_domains: Option<(bool,)> = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM service_domains WHERE service_id = $1)",
+    )
+    .bind(service_id)
+    .fetch_optional(pool)
+    .await?;
+    if !has_domains.map(|(v,)| v).unwrap_or(false) {
+        return Ok(None);
+    }
+
+    let preferred_node: Option<(String,)> = sqlx::query_as(
+        "SELECT d.node_id \
+         FROM deployments d \
+         WHERE d.service_id = $1 \
+           AND d.id <> $2 \
+           AND d.node_id IS NOT NULL \
+         ORDER BY \
+           CASE WHEN d.status = 'running' THEN 0 ELSE 1 END, \
+           d.created_at DESC \
+         LIMIT 1",
+    )
+    .bind(service_id)
+    .bind(deployment_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((node_id,)) = preferred_node else {
+        return Ok(None);
+    };
+
+    let row: Option<NodeCapacity> = sqlx::query_as(
+        "SELECT n.id, n.provider, n.total_cpu_millis, n.total_memory_mb, n.total_disk_mb, \
+                COALESCE(SUM(a.cpu_millis), 0)::bigint AS used_cpu_millis, \
+                COALESCE(SUM(a.memory_mb), 0)::bigint AS used_memory_mb, \
+                COALESCE(SUM(a.disk_mb), 0)::bigint AS used_disk_mb \
+         FROM nodes n \
+         LEFT JOIN node_allocations a ON a.node_id = n.id \
+         WHERE n.workspace_id = $1 AND n.status = 'ready' AND n.id = $2 \
+         GROUP BY n.id",
+    )
+    .bind(workspace_id)
+    .bind(node_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.filter(|row| {
+        let free_cpu = row.total_cpu_millis as i64 - row.used_cpu_millis.unwrap_or(0);
+        let free_mem = row.total_memory_mb as i64 - row.used_memory_mb.unwrap_or(0);
+        let free_disk = row.total_disk_mb as i64 - row.used_disk_mb.unwrap_or(0);
+        free_cpu >= need.cpu_millis as i64
+            && free_mem >= need.memory_mb as i64
+            && free_disk >= need.disk_mb as i64
+    }))
+}
+
 async fn place_and_run(state: &AppState, p: &PendingDeployment) -> Result<()> {
-    let picked = pick_node(state.pool(), &p.workspace_id, &p.resources).await?;
+    let picked = match pick_preferred_node_for_domains(
+        state.pool(),
+        &p.service_id,
+        &p.deployment_id,
+        &p.workspace_id,
+        &p.resources,
+    )
+    .await?
+    {
+        Some(node) => Some(node),
+        None => pick_node(state.pool(), &p.workspace_id, &p.resources).await?,
+    };
     let node = match picked {
         Some(n) => n,
         None => {
