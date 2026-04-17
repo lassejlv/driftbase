@@ -39,12 +39,25 @@ export interface SignupInput extends LoginInput {
   invite_token?: string;
 }
 
+/** Shape of POST /auth/signup. `pending: true` means the account was
+ * created but is waiting for platform-admin approval — no session is
+ * issued, so the UI should show a "pending" screen instead of
+ * redirecting into the app. */
+export type SignupResult = Me | { pending: true; email: string };
+
+export function isPendingSignup(r: SignupResult): r is { pending: true; email: string } {
+  return 'pending' in r && r.pending === true;
+}
+
 export function useSignup() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: SignupInput) => api<Me>('/auth/signup', { method: 'POST', body: input }),
-    onSuccess: (me) => {
-      qc.setQueryData(meQuery.queryKey, me);
+    mutationFn: (input: SignupInput) =>
+      api<SignupResult>('/auth/signup', { method: 'POST', body: input }),
+    onSuccess: (result) => {
+      if (!isPendingSignup(result)) {
+        qc.setQueryData(meQuery.queryKey, result);
+      }
     },
   });
 }

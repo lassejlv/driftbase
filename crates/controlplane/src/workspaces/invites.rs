@@ -251,7 +251,7 @@ pub async fn accept_for_user(
         return Err(ApiError::Validation("invite expired".into()));
     }
     if r.email.to_lowercase() != user_email.to_lowercase() {
-        return Err(ApiError::Forbidden);
+        return Err(ApiError::Forbidden(String::new()));
     }
 
     let invite_id = r.id;

@@ -93,6 +93,6 @@ pub fn require(ctx: &WorkspaceContext, minimum: Role) -> ApiResult<()> {
     if ctx.role.at_least(minimum) {
         Ok(())
     } else {
-        Err(ApiError::Forbidden)
+        Err(ApiError::Forbidden(String::new()))
     }
 }

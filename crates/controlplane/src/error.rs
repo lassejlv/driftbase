@@ -8,8 +8,8 @@ use thiserror::Error;
 pub enum ApiError {
     #[error("unauthorized")]
     Unauthorized,
-    #[error("forbidden")]
-    Forbidden,
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("not found")]
     NotFound,
     #[error("conflict: {0}")]
@@ -37,7 +37,7 @@ impl ApiError {
     fn status_and_code(&self) -> (StatusCode, &'static str) {
         match self {
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
-            ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            ApiError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             ApiError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation"),
@@ -56,6 +56,8 @@ impl IntoResponse for ApiError {
         }
         let message = match &self {
             ApiError::Internal(_) | ApiError::Sqlx(_) => "internal server error".to_string(),
+            ApiError::Forbidden(msg) if msg.is_empty() => "forbidden".to_string(),
+            ApiError::Forbidden(msg) => msg.clone(),
             other => other.to_string(),
         };
         (

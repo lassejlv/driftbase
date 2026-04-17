@@ -353,7 +353,7 @@ async fn update_member(
     .await?;
     let (current,) = current.ok_or(ApiError::NotFound)?;
     if current == "owner" {
-        return Err(ApiError::Forbidden);
+        return Err(ApiError::Forbidden(String::new()));
     }
 
     sqlx::query("UPDATE workspace_members SET role = $1 WHERE workspace_id = $2 AND user_id = $3")
@@ -388,7 +388,7 @@ async fn remove_member(
     .await?;
     let (target_role,) = target.ok_or(ApiError::NotFound)?;
     if target_role == "owner" {
-        return Err(ApiError::Forbidden);
+        return Err(ApiError::Forbidden(String::new()));
     }
 
     sqlx::query("DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2")

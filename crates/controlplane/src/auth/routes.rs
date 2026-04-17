@@ -39,13 +39,24 @@ pub struct MeResponse {
     pub email: String,
     pub display_name: String,
     pub created_at: DateTime<Utc>,
+    pub is_platform_admin: bool,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum SignupResponse {
+    /// Account immediately usable — first-ever user or invite acceptance.
+    Active(MeResponse),
+    /// Account created but awaiting platform-admin approval. No session
+    /// is issued; the client shows a "pending approval" screen.
+    Pending { pending: bool, email: String },
 }
 
 async fn signup(
     State(state): State<AppState>,
     jar: CookieJar,
     Json(req): Json<SignupRequest>,
-) -> ApiResult<(CookieJar, Json<MeResponse>)> {
+) -> ApiResult<(CookieJar, Json<SignupResponse>)> {
     validate_email(&req.email)?;
     validate_password(&req.password)?;
     if req.display_name.trim().is_empty() {
@@ -64,21 +75,53 @@ async fn signup(
         return Err(ApiError::Conflict("email already registered".into()));
     }
 
+    // First signup on this instance becomes the platform admin and is
+    // auto-approved so the installer isn't locked out of their own box.
+    let existing_count: (i64,) = sqlx::query_as("SELECT COUNT(*)::bigint FROM users")
+        .fetch_one(state.pool())
+        .await?;
+    let is_first_user = existing_count.0 == 0;
+
     sqlx::query(
-        "INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO users (id, email, password_hash, display_name, status, is_platform_admin) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(user_id.to_string())
     .bind(&email_norm)
     .bind(&password_hash)
     .bind(req.display_name.trim())
+    .bind(if is_first_user { "approved" } else { "pending" })
+    .bind(is_first_user)
     .execute(state.pool())
     .await?;
 
-    // Accept invite if one was supplied. Non-fatal if it fails to match.
+    // Accept invite if one was supplied. Treat successful acceptance as
+    // implicit approval — someone with a workspace already vouched for
+    // this person. Failed matches are non-fatal and leave the row
+    // pending for the platform admin to review.
+    let mut approved_via_invite = false;
     if let Some(token) = req.invite_token.as_deref() {
-        let _ =
-            crate::workspaces::invites::accept_for_user(state.pool(), token, &user_id, &email_norm)
-                .await;
+        if crate::workspaces::invites::accept_for_user(state.pool(), token, &user_id, &email_norm)
+            .await
+            .is_ok()
+        {
+            approved_via_invite = true;
+            sqlx::query("UPDATE users SET status = 'approved' WHERE id = $1")
+                .bind(user_id.to_string())
+                .execute(state.pool())
+                .await?;
+        }
+    }
+
+    let active = is_first_user || approved_via_invite;
+    if !active {
+        return Ok((
+            jar,
+            Json(SignupResponse::Pending {
+                pending: true,
+                email: email_norm,
+            }),
+        ));
     }
 
     let issued = session::create(state.pool(), &user_id, None, None)
@@ -95,8 +138,20 @@ async fn signup(
         email: email_norm,
         display_name: req.display_name.trim().to_string(),
         created_at: Utc::now(),
+        is_platform_admin: is_first_user,
     };
-    Ok((jar, Json(me)))
+    Ok((jar, Json(SignupResponse::Active(me))))
+}
+
+#[derive(sqlx::FromRow)]
+struct UserRow {
+    id: String,
+    email: String,
+    password_hash: String,
+    display_name: String,
+    created_at: DateTime<Utc>,
+    status: String,
+    is_platform_admin: bool,
 }
 
 async fn login(
@@ -105,23 +160,44 @@ async fn login(
     Json(req): Json<LoginRequest>,
 ) -> ApiResult<(CookieJar, Json<MeResponse>)> {
     let email_norm = req.email.trim().to_lowercase();
-    let row: Option<(String, String, String, String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT id, email, password_hash, display_name, created_at FROM users WHERE email = $1",
+    let row: Option<UserRow> = sqlx::query_as(
+        "SELECT id, email, password_hash, display_name, created_at, status, \
+                is_platform_admin \
+         FROM users WHERE email = $1",
     )
     .bind(&email_norm)
     .fetch_optional(state.pool())
     .await?;
 
-    let Some((id, email, hash, display_name, created_at)) = row else {
+    let Some(row) = row else {
         return Err(ApiError::Unauthorized);
     };
 
-    let ok = password::verify(&req.password, &hash).map_err(ApiError::Internal)?;
+    let ok = password::verify(&req.password, &row.password_hash).map_err(ApiError::Internal)?;
     if !ok {
         return Err(ApiError::Unauthorized);
     }
 
-    let user_id: Id = id
+    // Waitlist gate: password is right but the account isn't usable yet.
+    // 403 (Forbidden) is the right status — the credentials are valid,
+    // the account just isn't active. The UI keys off the message.
+    match row.status.as_str() {
+        "approved" => {}
+        "pending" => {
+            return Err(ApiError::Forbidden(
+                "Account pending approval — an administrator needs to approve your signup.".into(),
+            ));
+        }
+        "rejected" => {
+            return Err(ApiError::Forbidden("Account has been rejected.".into()));
+        }
+        _ => {
+            return Err(ApiError::Forbidden("Account is not active.".into()));
+        }
+    }
+
+    let user_id: Id = row
+        .id
         .parse()
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("{e}")))?;
     let issued = session::create(state.pool(), &user_id, None, None)
@@ -137,9 +213,10 @@ async fn login(
         jar,
         Json(MeResponse {
             id: user_id,
-            email,
-            display_name,
-            created_at,
+            email: row.email,
+            display_name: row.display_name,
+            created_at: row.created_at,
+            is_platform_admin: row.is_platform_admin,
         }),
     ))
 }
@@ -152,13 +229,37 @@ async fn logout(State(state): State<AppState>, jar: CookieJar) -> ApiResult<Cook
     Ok(jar)
 }
 
+#[derive(sqlx::FromRow)]
+struct MeRow {
+    id: String,
+    email: String,
+    display_name: String,
+    created_at: DateTime<Utc>,
+    status: String,
+    is_platform_admin: bool,
+}
+
 async fn me(State(state): State<AppState>, auth: AuthUser) -> ApiResult<Json<MeResponse>> {
-    let row: Option<(String, String, String, DateTime<Utc>)> =
-        sqlx::query_as("SELECT id, email, display_name, created_at FROM users WHERE id = $1")
-            .bind(auth.user_id.to_string())
-            .fetch_optional(state.pool())
-            .await?;
-    let (id, email, display_name, created_at) = row.ok_or(ApiError::Unauthorized)?;
+    let row: Option<MeRow> = sqlx::query_as(
+        "SELECT id, email, display_name, created_at, status, is_platform_admin \
+         FROM users WHERE id = $1",
+    )
+    .bind(auth.user_id.to_string())
+    .fetch_optional(state.pool())
+    .await?;
+    let MeRow {
+        id,
+        email,
+        display_name,
+        created_at,
+        status,
+        is_platform_admin,
+    } = row.ok_or(ApiError::Unauthorized)?;
+    // A user rejected after logging in should lose access on their next
+    // request, not wait for cookie expiry.
+    if status != "approved" {
+        return Err(ApiError::Unauthorized);
+    }
     Ok(Json(MeResponse {
         id: id
             .parse()
@@ -166,6 +267,7 @@ async fn me(State(state): State<AppState>, auth: AuthUser) -> ApiResult<Json<MeR
         email,
         display_name,
         created_at,
+        is_platform_admin,
     }))
 }
 

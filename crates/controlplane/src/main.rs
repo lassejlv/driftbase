@@ -7,6 +7,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use zediz_common::telemetry;
 
+mod admin;
 mod agent;
 mod auth;
 mod builds;
@@ -93,6 +94,7 @@ fn router(state: AppState) -> Router {
             }),
         )
         .nest("/auth", auth::routes::router())
+        .merge(admin::routes::router())
         .merge(workspaces::routes::router())
         .merge(workspaces::invites::router())
         .merge(credentials::routes::router())

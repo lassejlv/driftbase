@@ -1,6 +1,7 @@
 import { createFileRoute, Link, redirect, useNavigate } from '@tanstack/react-router';
 import { useState, type FormEvent } from 'react';
-import { meQuery, useSignup } from '@/lib/auth';
+import { Check } from 'lucide-react';
+import { isPendingSignup, meQuery, useSignup } from '@/lib/auth';
 import { ApiError } from '@/lib/api';
 import { Button, Card, ErrorText, Field, Input } from '@/components/ui';
 
@@ -27,21 +28,51 @@ function SignupPage() {
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null);
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
     try {
-      await signup.mutateAsync({
+      const result = await signup.mutateAsync({
         email,
         password,
         display_name: displayName,
         invite_token: invite,
       });
+      if (isPendingSignup(result)) {
+        setPendingEmail(result.email);
+        return;
+      }
       await navigate({ to: '/' });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Something went wrong');
     }
+  }
+
+  if (pendingEmail) {
+    return (
+      <div className="mx-auto max-w-sm pt-10">
+        <Card className="p-6 text-center">
+          <div className="mx-auto mb-3 inline-flex h-10 w-10 items-center justify-center rounded-full border border-emerald-500/40 text-emerald-500">
+            <Check className="h-5 w-5" />
+          </div>
+          <h1 className="text-lg font-semibold tracking-tight">You're on the waitlist</h1>
+          <p className="mt-2 text-sm text-[var(--color-muted)]">
+            We've created an account for{' '}
+            <span className="font-mono text-[var(--color-fg)]">{pendingEmail}</span>. Sign-in
+            will start working once an administrator approves it.
+          </p>
+          <div className="mt-5">
+            <Link to="/login">
+              <Button variant="secondary" className="w-full">
+                Back to sign in
+              </Button>
+            </Link>
+          </div>
+        </Card>
+      </div>
+    );
   }
 
   return (
@@ -89,6 +120,9 @@ function SignupPage() {
           <Link to="/login" className="text-[var(--color-fg)] underline-offset-4 hover:underline">
             Sign in
           </Link>
+        </p>
+        <p className="mt-3 text-[11px] leading-relaxed text-[var(--color-subtle)]">
+          New accounts are held for admin approval before sign-in works.
         </p>
       </Card>
     </div>

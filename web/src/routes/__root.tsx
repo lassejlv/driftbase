@@ -26,6 +26,14 @@ function RootComponent() {
         <div className="flex items-center gap-3">
           {me.data ? (
             <>
+              {me.data.is_platform_admin ? (
+                <Link
+                  to="/admin/users"
+                  className="text-xs text-[var(--color-muted)] hover:text-[var(--color-fg)]"
+                >
+                  Admin
+                </Link>
+              ) : null}
               <span className="text-xs text-[var(--color-muted)]">{me.data.email}</span>
               <Button
                 variant="ghost"

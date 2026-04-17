@@ -5,6 +5,7 @@ export interface Me {
   email: string;
   display_name: string;
   created_at: string;
+  is_platform_admin: boolean;
 }
 
 export interface WorkspaceSummary {
