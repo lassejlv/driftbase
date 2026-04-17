@@ -1,9 +1,10 @@
 services:
   controlplane:
+    image: ${ZEDIZ_CONTROLPLANE_IMAGE:-ghcr.io/lassejlv/zediz-controlplane:latest}
     build:
       context: .
       dockerfile: Dockerfile.controlplane
-    image: zediz-controlplane:latest
+    pull_policy: always
     restart: unless-stopped
     environment:
       ZEDIZ_BIND_ADDR: 0.0.0.0:8080

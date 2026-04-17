@@ -1,4 +1,4 @@
-name: Build agent image
+name: Build controlplane image
 
 on:
   push:
@@ -7,8 +7,8 @@ on:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'Dockerfile.agent'
-      - '.github/workflows/agent-image.yml'
+      - 'Dockerfile.controlplane'
+      - '.github/workflows/controlplane-image.yml'
   workflow_dispatch:
 
 jobs:
@@ -31,7 +31,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/lassejlv/zediz-agent
+          images: ghcr.io/lassejlv/zediz-controlplane
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short
@@ -39,9 +39,9 @@ jobs:
       - uses: docker/build-push-action@v5
         with:
           context: .
-          file: Dockerfile.agent
+          file: Dockerfile.controlplane
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=agent
-          cache-to: type=gha,mode=max,scope=agent
+          cache-from: type=gha,scope=controlplane
+          cache-to: type=gha,mode=max,scope=controlplane
