@@ -762,20 +762,39 @@ async fn ensure_volume_attached(
         .ok_or_else(|| anyhow!("workspace has no Hetzner API token"))?;
     let client = zediz_hetzner::HetznerClient::new(&token);
 
-    // Detach from current node (if any) before attaching elsewhere.
+    // Detach from the current node (if any) before attaching elsewhere.
+    // Hetzner auto-detaches volumes when a server is deleted, so our DB
+    // can legitimately disagree with reality ("attached to X" in DB, X
+    // is gone, Hetzner already unattached). Treat detach failures as
+    // "already detached" and carry on — if the volume is actually
+    // attached somewhere it shouldn't be, the subsequent attach call
+    // surfaces that with a clear error.
     if volume.attached_node_id.is_some() {
         sqlx::query("UPDATE volumes SET status = 'detaching', updated_at = now() WHERE id = $1")
             .bind(&volume.id)
             .execute(state.pool())
             .await?;
-        let action = client
-            .detach_volume(hz_volume_id)
-            .await
-            .map_err(|e| anyhow!("hetzner detach_volume: {e}"))?;
-        client
-            .wait_for_action(action.id, std::time::Duration::from_secs(60))
-            .await
-            .map_err(|e| anyhow!("hetzner detach action: {e}"))?;
+        match client.detach_volume(hz_volume_id).await {
+            Ok(action) => {
+                if let Err(e) = client
+                    .wait_for_action(action.id, std::time::Duration::from_secs(60))
+                    .await
+                {
+                    tracing::warn!(
+                        volume = %volume.id,
+                        error = ?e,
+                        "hetzner detach action — continuing on the assumption it's already detached",
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    volume = %volume.id,
+                    error = ?e,
+                    "hetzner detach_volume — continuing on the assumption it's already detached",
+                );
+            }
+        }
         sqlx::query("UPDATE volumes SET attached_node_id = NULL, updated_at = now() WHERE id = $1")
             .bind(&volume.id)
             .execute(state.pool())

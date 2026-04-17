@@ -607,8 +607,8 @@ function DeploymentRow({
         </td>
       ) : null}
       {showReason ? (
-        <td className="px-4 py-2 text-xs text-[var(--color-muted)]">
-          {d.reason ? <span title={d.reason}>{truncate(d.reason, 40)}</span> : '—'}
+        <td className="max-w-sm px-4 py-2 text-xs text-[var(--color-muted)]">
+          {d.reason ? <span className="whitespace-pre-wrap break-words">{d.reason}</span> : '—'}
         </td>
       ) : null}
       <td className="px-4 py-2 text-right">
@@ -671,9 +671,6 @@ function truncateImage(ref: string): string {
   return ref.slice(0, 37) + '…';
 }
 
-function truncate(s: string, max: number): string {
-  return s.length <= max ? s : s.slice(0, max - 1) + '…';
-}
 
 function formatDuration(d: DeploymentSummary): string {
   const start = d.started_at ? new Date(d.started_at).getTime() : null;
@@ -894,8 +891,8 @@ function BuildRow({
       <td className="px-4 py-2 font-mono text-xs text-[var(--color-muted)]">
         {formatBuildDuration(b)}
       </td>
-      <td className="px-4 py-2 text-xs text-[var(--color-muted)]">
-        {b.reason ? <span title={b.reason}>{truncate(b.reason, 40)}</span> : '—'}
+      <td className="max-w-sm px-4 py-2 text-xs text-[var(--color-muted)]">
+        {b.reason ? <span className="whitespace-pre-wrap break-words">{b.reason}</span> : '—'}
       </td>
       <td className="px-4 py-2 text-right">
         {b.deployment_id ? (
