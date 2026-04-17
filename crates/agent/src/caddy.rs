@@ -122,18 +122,23 @@ pub async fn ensure_running(docker: &Docker) -> Result<()> {
         ..Default::default()
     };
 
+    // Bootstrap script: on first boot write a minimal config with the admin
+    // API bound to 0.0.0.0 (so Docker port binding can actually reach it);
+    // on subsequent boots --resume picks up /config/caddy/autosave.json that
+    // Caddy persists every time we POST /load.
+    let bootstrap = r#"set -eu
+mkdir -p /etc/caddy
+cat > /etc/caddy/bootstrap.json <<'JSON'
+{"admin":{"listen":"0.0.0.0:2019"},"apps":{"http":{"servers":{"zediz":{"listen":[":80",":443"],"routes":[]}}}}}
+JSON
+exec caddy run --config /etc/caddy/bootstrap.json --resume
+"#;
+
     let config: Config<String> = Config {
         image: Some(CADDY_IMAGE.into()),
         exposed_ports: Some(exposed),
         host_config: Some(host_config),
-        // Run caddy with the admin API enabled globally so we can POST config.
-        cmd: Some(vec![
-            "caddy".into(),
-            "run".into(),
-            "--config".into(),
-            "/config/caddy.json".into(),
-            "--resume".into(),
-        ]),
+        entrypoint: Some(vec!["sh".into(), "-c".into(), bootstrap.to_string()]),
         ..Default::default()
     };
 
@@ -149,17 +154,8 @@ pub async fn ensure_running(docker: &Docker) -> Result<()> {
         .await?;
     docker.start_container::<String>(&created.id, None).await?;
 
-    // Give Caddy a moment to come up.
+    // Give Caddy a moment to come up before any subsequent /load POST.
     tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // If there's no config yet, POST an empty one so /load accepts updates.
-    let http = reqwest::Client::new();
-    let _ = http
-        .post(format!("{CADDY_ADMIN_URL}/load"))
-        .json(&empty_config())
-        .send()
-        .await;
-
     Ok(())
 }
 
@@ -220,10 +216,6 @@ pub async fn apply_routes(routes: &[Route]) -> Result<()> {
     Ok(())
 }
 
-fn empty_config() -> JsonValue {
-    build_config(&[])
-}
-
 fn build_config(routes: &[Route]) -> JsonValue {
     // One route per hostname, reverse-proxying to the container on the
     // shared docker network by container name at the configured port.
@@ -244,7 +236,10 @@ fn build_config(routes: &[Route]) -> JsonValue {
         })
         .collect();
 
+    // IMPORTANT: include `admin.listen` in every /load so we don't drop the
+    // admin API and lock ourselves out of future route pushes.
     json!({
+        "admin": { "listen": "0.0.0.0:2019" },
         "apps": {
             "http": {
                 "servers": {
