@@ -132,8 +132,9 @@ async fn handle(State(state): State<AppState>, req: Request) -> Response {
     let upstream_body = reqwest::Body::wrap_stream(body_stream);
 
     let client = reqwest::Client::builder()
-        // Docker pushes can take a while; don't cap.
-        .timeout(std::time::Duration::from_secs(0))
+        // Docker pushes can take a while. Leave the overall request timeout
+        // unset instead of using `Duration::ZERO`, which causes immediate
+        // request timeouts.
         .build()
         .expect("reqwest client");
 
