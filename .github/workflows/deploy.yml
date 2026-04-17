@@ -1,0 +1,30 @@
+name: Deploy to zediz server
+
+# Manual-only: pulls the latest main on the server and bounces docker-compose.
+# Requires these repo secrets:
+#   DEPLOY_SSH_HOST  — host or IP of the zediz server
+#   DEPLOY_SSH_USER  — SSH user (e.g. root)
+#   DEPLOY_SSH_KEY   — private key (PEM) authorized on the server
+# Optional:
+#   DEPLOY_SSH_PORT  — defaults to 22
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH and redeploy
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          username: ${{ secrets.DEPLOY_SSH_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_SSH_PORT || 22 }}
+          script: |
+            set -euo pipefail
+            cd zediz
+            git pull
+            docker compose down
+            docker compose up -d
