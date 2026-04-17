@@ -52,6 +52,7 @@ pub fn spawn(state: AppState) -> SchedulerHandle {
         let tick = Duration::from_secs(2);
         let mut autoscale_counter: u32 = 0;
         let mut tls_probe_counter: u32 = 0;
+        let mut reap_counter: u32 = 0;
         loop {
             if let Err(e) = tick_once(&state_for_task).await {
                 tracing::error!(error = ?e, "scheduler tick failed");
@@ -69,10 +70,76 @@ pub fn spawn(state: AppState) -> SchedulerHandle {
                     tracing::warn!(error = ?e, "autoscale-down failed");
                 }
             }
+            // Reap deployments stuck in transient states every ~30 ticks
+            // (~60 seconds). Catches silent agent stalls so the UI doesn't
+            // sit on "pulling image" forever.
+            reap_counter = reap_counter.wrapping_add(1);
+            if reap_counter.is_multiple_of(30) {
+                if let Err(e) = reap_stale_deployments(&state_for_task).await {
+                    tracing::warn!(error = ?e, "reap_stale_deployments failed");
+                }
+            }
             handle_for_task.wait(tick).await;
         }
     });
     handle
+}
+
+/// How long a deployment may sit in `pulling` or `starting` before the
+/// scheduler gives up and marks it `errored`. Bigger than the slowest
+/// realistic image pull, small enough that users see the failure before
+/// they forget they clicked deploy.
+const STALE_DEPLOYMENT_MINUTES: i64 = 15;
+
+/// Find deployments that have been in a transient state for too long and
+/// mark them `errored`. Happens when the agent's status POST silently
+/// fails, the agent crashes mid-pull, or Docker hangs. Releases the
+/// allocation, asks the node to tear down any orphaned container, and
+/// refreshes Caddy routes so a stuck deployment can't keep claiming a
+/// domain.
+async fn reap_stale_deployments(state: &AppState) -> Result<()> {
+    let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+        "UPDATE deployments \
+         SET status = 'errored', \
+             reason = 'stuck in ' || status || ' for over ' || $1::text || ' minutes', \
+             stopped_at = now(), \
+             updated_at = now() \
+         WHERE status IN ('pulling', 'starting') \
+           AND updated_at < now() - ($1 || ' minutes')::interval \
+         RETURNING id, node_id, service_id",
+    )
+    .bind(STALE_DEPLOYMENT_MINUTES)
+    .fetch_all(state.pool())
+    .await?;
+
+    for (deployment_id, node_id, service_id) in rows {
+        tracing::warn!(
+            deployment = %deployment_id,
+            service = %service_id,
+            node = ?node_id,
+            "reaped deployment stuck in transient state",
+        );
+
+        let _ = sqlx::query("DELETE FROM node_allocations WHERE deployment_id = $1")
+            .bind(&deployment_id)
+            .execute(state.pool())
+            .await;
+
+        if let Some(node_id) = node_id {
+            let _ = commands::enqueue(
+                state.pool(),
+                &node_id,
+                Some(&deployment_id),
+                CommandKind::Remove,
+                json!({}),
+            )
+            .await;
+            if let Err(e) = push_routes_for_node(state.pool(), &node_id).await {
+                tracing::warn!(error = ?e, node = %node_id, "push_routes_for_node after reap");
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn tick_once(state: &AppState) -> Result<()> {

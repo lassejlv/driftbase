@@ -1,8 +1,14 @@
 use anyhow::Result;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::client::{CommandAck, ControlPlaneClient, HeartbeatBody, StatusBody};
 use crate::docker::{DockerExec, PortSpec, RegistryAuth, RunSpec};
+
+/// Upper bound on a single `pull_and_run` so a hung Docker daemon or
+/// unreachable registry can't leave the deployment stuck forever. The
+/// scheduler has a longer reaper (15 minutes) behind this as a safety net.
+const PULL_AND_RUN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 pub struct Executor {
     client: ControlPlaneClient,
@@ -145,8 +151,12 @@ impl Executor {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("pull_and_run missing deployment_id"))?;
 
-        // Tell the CP we're starting.
-        let _ = self
+        // Tell the CP we're starting. These intermediate status reports are
+        // best-effort — if the POST fails we still attempt the pull, and the
+        // final `running` report (or the errored path below) brings the
+        // deployment row back in sync. Log so silent POST failures don't
+        // leave us debugging in the dark.
+        if let Err(e) = self
             .client
             .report_status(
                 &self.node_token,
@@ -157,10 +167,13 @@ impl Executor {
                     reason: None,
                 },
             )
-            .await;
+            .await
+        {
+            tracing::warn!(deployment = %deployment_id, error = ?e, "report_status pulling");
+        }
 
         let spec = parse_run_spec(&deployment_id, &cmd.payload)?;
-        let _ = self
+        if let Err(e) = self
             .client
             .report_status(
                 &self.node_token,
@@ -171,14 +184,19 @@ impl Executor {
                     reason: None,
                 },
             )
-            .await;
+            .await
+        {
+            tracing::warn!(deployment = %deployment_id, error = ?e, "report_status starting");
+        }
 
-        let container_id = match self.docker.pull_and_run(spec).await {
-            Ok(id) => id,
-            Err(e) => {
+        let pull_result =
+            tokio::time::timeout(PULL_AND_RUN_TIMEOUT, self.docker.pull_and_run(spec)).await;
+        let container_id = match pull_result {
+            Ok(Ok(id)) => id,
+            Ok(Err(e)) => {
                 // Make the failure visible on the deployment row, not just on
                 // the agent_commands ack that the UI never shows.
-                let _ = self
+                if let Err(post_err) = self
                     .client
                     .report_status(
                         &self.node_token,
@@ -189,8 +207,41 @@ impl Executor {
                             reason: Some(e.to_string()),
                         },
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        deployment = %deployment_id,
+                        error = ?post_err,
+                        "report_status errored",
+                    );
+                }
                 return Err(e);
+            }
+            Err(_elapsed) => {
+                let msg = format!(
+                    "pull_and_run timed out after {}s",
+                    PULL_AND_RUN_TIMEOUT.as_secs()
+                );
+                if let Err(post_err) = self
+                    .client
+                    .report_status(
+                        &self.node_token,
+                        &deployment_id,
+                        &StatusBody {
+                            status: "errored".into(),
+                            container_id: None,
+                            reason: Some(msg.clone()),
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        deployment = %deployment_id,
+                        error = ?post_err,
+                        "report_status errored after timeout",
+                    );
+                }
+                return Err(anyhow::anyhow!(msg));
             }
         };
 
