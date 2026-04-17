@@ -30,6 +30,7 @@ bun.lockb.bak
 
 # Generated
 web/src/routeTree.gen.ts
+web/tsconfig.*.tsbuildinfo
 
 # Secrets
 *.pem
