@@ -44,8 +44,11 @@ write_files:
       # container starts. Without this, mounts the agent makes inside
       # its namespace don't propagate to the host, so Docker can't see
       # the volume when binding it into a service container.
-      ExecStartPre=/usr/bin/mountpoint -q /var/lib/zediz/volumes || /usr/bin/mount --bind /var/lib/zediz/volumes /var/lib/zediz/volumes
-      ExecStartPre=/usr/bin/mount --make-rshared /var/lib/zediz/volumes
+      #
+      # systemd ExecStartPre runs commands directly (no shell), so we
+      # wrap in /bin/sh -c to use the || guard for idempotence.
+      ExecStartPre=/bin/sh -c 'mountpoint -q /var/lib/zediz/volumes || mount --bind /var/lib/zediz/volumes /var/lib/zediz/volumes'
+      ExecStartPre=/bin/sh -c 'mount --make-rshared /var/lib/zediz/volumes'
       ExecStart=/usr/bin/docker run --rm --name zediz-agent \
         --network host \
         --env-file /etc/zediz/agent.env \
