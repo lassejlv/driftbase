@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { Trash2 } from 'lucide-react';
 import {
   serviceQuery,
@@ -30,6 +31,7 @@ import { ServiceMetricsTab } from '@/components/service-metrics';
 import { EnvVarsSection, ServiceSettingsTab } from '@/components/service-settings';
 import { ServiceVolumeTab } from '@/components/service-volume';
 import { buildsQuery, buildTone } from '@/lib/builds';
+import { spring, tabSwap } from '@/lib/motion-presets';
 import type { BuildSummary, DeploymentSummary, ServiceSummary } from '@/lib/types';
 
 export type InspectorTab =
@@ -83,6 +85,7 @@ export function ServiceInspector({
 
   const canDeploy = canWrite(workspace.data);
   const canDelete = canAdmin(workspace.data);
+  const shouldReduce = useReducedMotion();
 
   const [error, setError] = useState<string | null>(null);
   const [activeDeploymentId, setActiveDeploymentId] = useState<string | null>(null);
@@ -156,103 +159,157 @@ export function ServiceInspector({
 
       {error ? <ErrorText>{error}</ErrorText> : null}
 
-      {tab === 'metrics' && svc ? (
-        <ServiceMetricsTab
-          service={svc}
-          workspaceSlug={workspaceSlug}
-          projectSlug={projectSlug}
-          serviceSlug={serviceSlug}
-        />
-      ) : null}
+      <AnimatePresence mode="wait" initial={false}>
+        <motion.div
+          key={tab}
+          variants={tabSwap}
+          initial="hidden"
+          animate="visible"
+          exit="exit"
+          transition={shouldReduce ? { duration: 0 } : spring.snappy}
+        >
+          {renderTabBody(tab, {
+            svc,
+            workspaceSlug,
+            projectSlug,
+            serviceSlug,
+            canDeploy,
+            canDelete,
+            deployments: deployments.data ?? [],
+            activeDeploymentId,
+            setActiveDeploymentId,
+            setTab,
+            deployLabel,
+            isDeploying: deploy.isPending,
+            onDeploy,
+            onDelete,
+            onRestart: (id: string) => restart.mutate(id),
+            onStop: (id: string) => stop.mutate(id),
+          })}
+        </motion.div>
+      </AnimatePresence>
+    </Stack>
+  );
+}
 
-      {tab === 'deployments' ? (
+interface TabBodyArgs {
+  svc: ServiceSummary | undefined;
+  workspaceSlug: string;
+  projectSlug: string;
+  serviceSlug: string;
+  canDeploy: boolean;
+  canDelete: boolean;
+  deployments: DeploymentSummary[];
+  activeDeploymentId: string | null;
+  setActiveDeploymentId: (id: string | null) => void;
+  setTab: (t: InspectorTab) => void;
+  deployLabel: string;
+  isDeploying: boolean;
+  onDeploy: () => void | Promise<void>;
+  onDelete: () => void | Promise<void>;
+  onRestart: (id: string) => void;
+  onStop: (id: string) => void;
+}
+
+function renderTabBody(tab: InspectorTab, a: TabBodyArgs): ReactNode {
+  switch (tab) {
+    case 'metrics':
+      return a.svc ? (
+        <ServiceMetricsTab
+          service={a.svc}
+          workspaceSlug={a.workspaceSlug}
+          projectSlug={a.projectSlug}
+          serviceSlug={a.serviceSlug}
+        />
+      ) : null;
+    case 'deployments':
+      return (
         <Stack gap={3}>
-          {canDeploy || canDelete ? (
+          {a.canDeploy || a.canDelete ? (
             <Inline gap={2} justify="end">
-              {canDeploy ? (
-                <Button onClick={onDeploy} disabled={deploy.isPending} title="⌘ ↵">
-                  {deploy.isPending ? 'Deploying…' : deployLabel}
+              {a.canDeploy ? (
+                <Button onClick={a.onDeploy} disabled={a.isDeploying} title="⌘ ↵">
+                  {a.isDeploying ? 'Deploying…' : a.deployLabel}
                 </Button>
               ) : null}
-              {canDelete ? (
-                <Button variant="danger" onClick={onDelete} title="Delete service">
+              {a.canDelete ? (
+                <Button variant="danger" onClick={a.onDelete} title="Delete service">
                   <Trash2 className="h-3.5 w-3.5" />
                 </Button>
               ) : null}
             </Inline>
           ) : null}
           <DeploymentsTable
-            deployments={deployments.data ?? []}
-            canManage={canDeploy}
-            activeId={activeDeploymentId}
+            deployments={a.deployments}
+            canManage={a.canDeploy}
+            activeId={a.activeDeploymentId}
             onSelect={(id) => {
-              setActiveDeploymentId(id);
-              setTab('logs');
+              a.setActiveDeploymentId(id);
+              a.setTab('logs');
             }}
-            onStop={(id) => stop.mutate(id)}
-            onRestart={(id) => restart.mutate(id)}
+            onStop={a.onStop}
+            onRestart={a.onRestart}
           />
         </Stack>
-      ) : null}
-
-      {tab === 'volume' && svc ? (
+      );
+    case 'volume':
+      return a.svc ? (
         <ServiceVolumeTab
-          service={svc}
-          workspaceSlug={workspaceSlug}
-          projectSlug={projectSlug}
-          canManage={canDeploy}
+          service={a.svc}
+          workspaceSlug={a.workspaceSlug}
+          projectSlug={a.projectSlug}
+          canManage={a.canDeploy}
         />
-      ) : null}
-
-      {tab === 'domains' ? (
+      ) : null;
+    case 'domains':
+      return (
         <DomainsSection
-          workspaceSlug={workspaceSlug}
-          projectSlug={projectSlug}
-          serviceSlug={serviceSlug}
-          canManage={canDeploy}
-          defaultPort={svc?.ports?.[0]?.container_port ?? null}
+          workspaceSlug={a.workspaceSlug}
+          projectSlug={a.projectSlug}
+          serviceSlug={a.serviceSlug}
+          canManage={a.canDeploy}
+          defaultPort={a.svc?.ports?.[0]?.container_port ?? null}
         />
-      ) : null}
-
-      {tab === 'builds' ? (
+      );
+    case 'builds':
+      return (
         <BuildsTab
-          workspaceSlug={workspaceSlug}
-          projectSlug={projectSlug}
-          serviceSlug={serviceSlug}
+          workspaceSlug={a.workspaceSlug}
+          projectSlug={a.projectSlug}
+          serviceSlug={a.serviceSlug}
           onViewLogs={(deploymentId) => {
-            setActiveDeploymentId(deploymentId);
-            setTab('logs');
+            a.setActiveDeploymentId(deploymentId);
+            a.setTab('logs');
           }}
         />
-      ) : null}
-
-      {tab === 'logs' ? (
+      );
+    case 'logs':
+      return (
         <LogsTab
-          deployments={deployments.data ?? []}
-          activeId={activeDeploymentId}
-          onSelect={(id) => setActiveDeploymentId(id)}
+          deployments={a.deployments}
+          activeId={a.activeDeploymentId}
+          onSelect={a.setActiveDeploymentId}
         />
-      ) : null}
-
-      {tab === 'variables' && svc ? (
+      );
+    case 'variables':
+      return a.svc ? (
         <EnvVarsSection
-          service={svc}
-          workspaceSlug={workspaceSlug}
-          projectSlug={projectSlug}
-          canManage={canDeploy}
+          service={a.svc}
+          workspaceSlug={a.workspaceSlug}
+          projectSlug={a.projectSlug}
+          canManage={a.canDeploy}
         />
-      ) : null}
-
-      {tab === 'settings' && svc ? (
+      ) : null;
+    case 'settings':
+      return a.svc ? (
         <ServiceSettingsTab
-          service={svc}
-          workspaceSlug={workspaceSlug}
-          projectSlug={projectSlug}
-          canManage={canDeploy}
+          service={a.svc}
+          workspaceSlug={a.workspaceSlug}
+          projectSlug={a.projectSlug}
+          canManage={a.canDeploy}
         />
-      ) : null}
-    </Stack>
-  );
+      ) : null;
+  }
 }
 
 /* ---------- status ---------- */

@@ -1,7 +1,9 @@
-import { useRef, type PointerEvent as ReactPointerEvent } from 'react';
+import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { motion, useReducedMotion } from 'motion/react';
 import type { DeploymentSummary, ServiceSummary } from '@/lib/types';
 import { deploymentTone } from '@/lib/deployments';
 import { NODE_WIDTH } from '@/lib/canvas-layout';
+import { spring } from '@/lib/motion-presets';
 import { kindFor, ServiceLogo } from './service-logo';
 
 export interface CanvasServiceNodeState {
@@ -65,8 +67,10 @@ export function CanvasServiceNode({
   const kind = kindFor(service);
   const { tone, pulse } = deploymentTone(latestDeployment?.status);
   const label = STATUS_LABEL[latestDeployment?.status ?? 'none'];
+  const shouldReduce = useReducedMotion();
 
   const movedRef = useRef(false);
+  const [dragging, setDragging] = useState(false);
 
   const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
@@ -85,6 +89,7 @@ export function CanvasServiceNode({
       const dy = (ev.clientY - startY) / (zoom || 1);
       if (!movedRef.current && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
         movedRef.current = true;
+        setDragging(true);
       }
       if (movedRef.current) onDrag(service.id, origX + dx, origY + dy);
     };
@@ -95,6 +100,7 @@ export function CanvasServiceNode({
       node.removeEventListener('pointercancel', onUp);
       if (movedRef.current) {
         onDragCommit();
+        setDragging(false);
       } else {
         onSelect(service.id);
       }
@@ -105,8 +111,11 @@ export function CanvasServiceNode({
     node.addEventListener('pointercancel', onUp);
   };
 
+  const baseShadow = '0 1px 2px rgba(0,0,0,0.25)';
+  const dragShadow = '0 12px 28px rgba(0,0,0,0.35)';
+
   return (
-    <div
+    <motion.div
       role="button"
       tabIndex={0}
       onPointerDown={handlePointerDown}
@@ -116,9 +125,16 @@ export function CanvasServiceNode({
           onSelect(service.id);
         }
       }}
+      whileHover={shouldReduce || dragging ? undefined : { y: -1 }}
+      animate={{
+        scale: shouldReduce ? 1 : selected ? 1.02 : 1,
+        opacity: dragging ? 0.92 : 1,
+        boxShadow: dragging ? dragShadow : baseShadow,
+      }}
+      transition={shouldReduce ? { duration: 0 } : spring.snappy}
       className={[
         'absolute select-none overflow-hidden rounded-[10px] border bg-[var(--color-surface)]',
-        'shadow-[0_1px_2px_rgba(0,0,0,0.25)] transition-colors duration-150',
+        'transition-colors duration-150',
         'cursor-grab active:cursor-grabbing',
         selected
           ? 'border-[var(--color-border-strong)] ring-1 ring-[var(--color-border-strong)]'
@@ -151,6 +167,6 @@ export function CanvasServiceNode({
         />
         <span>{label}</span>
       </div>
-    </div>
+    </motion.div>
   );
 }

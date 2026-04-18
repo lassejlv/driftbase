@@ -10,6 +10,7 @@ import {
 } from 'react';
 import { Link } from '@tanstack/react-router';
 import { useQueries, useQuery } from '@tanstack/react-query';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { Plus } from 'lucide-react';
 import type {
   DeploymentSummary,
@@ -26,6 +27,7 @@ import {
   saveLayout,
   type Layout,
 } from '@/lib/canvas-layout';
+import { slideInRight, spring } from '@/lib/motion-presets';
 import { CanvasServiceNode } from './canvas-service-node';
 import { CanvasDrawer } from './canvas-drawer';
 import { ToolDock } from './tool-dock';
@@ -54,6 +56,7 @@ export function ProjectCanvas({
   onSelectService,
   onChangeTab,
 }: Props) {
+  const shouldReduce = useReducedMotion();
   const workspace = useQuery(workspaceQuery(workspaceSlug));
   const services = useQuery({
     ...servicesQuery(workspaceSlug, projectSlug),
@@ -300,13 +303,16 @@ export function ProjectCanvas({
         </div>
 
         {/* Add service popover */}
-        {addOpen && canCreate ? (
-          <AddServicePopover
-            workspaceSlug={workspaceSlug}
-            projectSlug={projectSlug}
-            onClose={() => setAddOpen(false)}
-          />
-        ) : null}
+        <AnimatePresence>
+          {addOpen && canCreate ? (
+            <AddServicePopover
+              key="add-popover"
+              workspaceSlug={workspaceSlug}
+              projectSlug={projectSlug}
+              onClose={() => setAddOpen(false)}
+            />
+          ) : null}
+        </AnimatePresence>
 
         {/* Tool dock */}
         <ToolDock
@@ -348,34 +354,47 @@ export function ProjectCanvas({
       </div>
 
       {/* Drawer */}
-      {selectedServiceId && selectedService ? (
-        <Drawer
-          workspaceSlug={workspaceSlug}
-          projectSlug={projectSlug}
-          service={selectedService}
-          activeTab={activeTab}
-          onChangeTab={onChangeTab}
-          onClose={() => onSelectService(null)}
-        />
-      ) : null}
+      <AnimatePresence>
+        {selectedServiceId && selectedService ? (
+          <Drawer
+            key={selectedService.id}
+            workspaceSlug={workspaceSlug}
+            projectSlug={projectSlug}
+            service={selectedService}
+            activeTab={activeTab}
+            onChangeTab={onChangeTab}
+            onClose={() => onSelectService(null)}
+            shouldReduce={!!shouldReduce}
+          />
+        ) : null}
+      </AnimatePresence>
     </div>
   );
 }
 
-function Drawer(props: {
+function Drawer({
+  shouldReduce,
+  ...props
+}: {
   workspaceSlug: string;
   projectSlug: string;
   service: ServiceSummary;
   activeTab?: InspectorTab;
   onChangeTab: (tab: InspectorTab) => void;
   onClose: () => void;
+  shouldReduce: boolean;
 }) {
   return (
-    <div
+    <motion.div
+      variants={slideInRight}
+      initial="hidden"
+      animate="visible"
+      exit="exit"
+      transition={shouldReduce ? { duration: 0 } : spring.smooth}
       className="absolute right-0 top-0 bottom-0 z-10 border-l border-[var(--color-border)] shadow-[-12px_0_32px_rgba(0,0,0,0.25)]"
       style={{ width: 'min(720px, 80vw)' }}
     >
       <CanvasDrawer {...props} />
-    </div>
+    </motion.div>
   );
 }

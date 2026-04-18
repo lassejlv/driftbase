@@ -7,7 +7,9 @@ import {
   type ReactNode,
   type SelectHTMLAttributes,
 } from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { Check, Copy } from 'lucide-react';
+import { popIn, spring } from '@/lib/motion-presets';
 
 type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger';
 
@@ -25,9 +27,12 @@ export function Button({
   className,
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
+  const shouldReduce = useReducedMotion();
   return (
-    <button
-      {...props}
+    <motion.button
+      {...(props as React.ComponentProps<typeof motion.button>)}
+      whileTap={shouldReduce || props.disabled ? undefined : { scale: 0.97 }}
+      transition={spring.snappy}
       className={[
         'inline-flex h-9 items-center justify-center rounded-md px-3 text-sm font-medium transition-colors duration-150',
         buttonStyles[variant],
@@ -365,11 +370,34 @@ export function CopyableId({
       ].join(' ')}
     >
       <span>{display ?? value}</span>
-      {copied ? (
-        <Check className="h-3 w-3 text-emerald-400" />
-      ) : (
-        <Copy className="h-3 w-3 opacity-0 transition-opacity group-hover:opacity-60" />
-      )}
+      <span className="relative inline-flex h-3 w-3 items-center justify-center">
+        <AnimatePresence initial={false} mode="wait">
+          {copied ? (
+            <motion.span
+              key="check"
+              variants={popIn}
+              initial="hidden"
+              animate="visible"
+              exit="exit"
+              transition={spring.bouncy}
+              className="absolute inset-0"
+            >
+              <Check className="h-3 w-3 text-emerald-400" />
+            </motion.span>
+          ) : (
+            <motion.span
+              key="copy"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.12 }}
+              className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-60"
+            >
+              <Copy className="h-3 w-3" />
+            </motion.span>
+          )}
+        </AnimatePresence>
+      </span>
     </button>
   );
 }

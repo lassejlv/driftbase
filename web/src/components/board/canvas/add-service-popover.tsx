@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
+import { motion, useReducedMotion } from 'motion/react';
 import { Search } from 'lucide-react';
+import { popIn } from '@/lib/motion-presets';
 import { ServiceLogo, type ServiceKind } from './service-logo';
 
 interface Props {
@@ -66,6 +68,7 @@ export function AddServicePopover({ workspaceSlug, projectSlug, onClose }: Props
   const [query, setQuery] = useState('');
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
+  const shouldReduce = useReducedMotion();
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -92,8 +95,14 @@ export function AddServicePopover({ workspaceSlug, projectSlug, onClose }: Props
   };
 
   return (
-    <div
+    <motion.div
+      variants={popIn}
+      initial="hidden"
+      animate="visible"
+      exit="exit"
+      transition={shouldReduce ? { duration: 0 } : { duration: 0.14 }}
       className="pointer-events-auto absolute right-4 top-[60px] z-30 w-[300px] rounded-[10px] border border-[var(--color-border-strong)] bg-[var(--color-surface)] p-1 shadow-[0_20px_48px_rgba(0,0,0,0.5)]"
+      style={{ transformOrigin: 'top right' }}
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
     >
@@ -147,6 +156,6 @@ export function AddServicePopover({ workspaceSlug, projectSlug, onClose }: Props
           No templates match.
         </div>
       ) : null}
-    </div>
+    </motion.div>
   );
 }

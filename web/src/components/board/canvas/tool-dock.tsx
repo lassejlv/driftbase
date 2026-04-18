@@ -1,5 +1,7 @@
 import { Maximize2, Minus, Plus, Settings2 } from 'lucide-react';
 import type { ReactNode } from 'react';
+import { motion, useReducedMotion } from 'motion/react';
+import { spring } from '@/lib/motion-presets';
 
 interface Props {
   onZoomIn: () => void;
@@ -44,14 +46,18 @@ function Tool({
   onClick: () => void;
   children: ReactNode;
 }) {
+  const shouldReduce = useReducedMotion();
   return (
-    <button
+    <motion.button
       type="button"
       title={title}
       onClick={onClick}
+      whileTap={shouldReduce ? undefined : { scale: 0.9 }}
+      whileHover={shouldReduce ? undefined : { y: -0.5 }}
+      transition={spring.snappy}
       className="inline-flex h-7 w-7 items-center justify-center rounded-[5px] text-[var(--color-muted)] transition-colors hover:bg-black/5 hover:text-[var(--color-fg)] dark:hover:bg-white/5"
     >
       {children}
-    </button>
+    </motion.button>
   );
 }
