@@ -46,12 +46,6 @@ export function ServiceSettingsTab({
         projectSlug={projectSlug}
         canManage={canManage}
       />
-      <EnvVarsSection
-        service={service}
-        workspaceSlug={workspaceSlug}
-        projectSlug={projectSlug}
-        canManage={canManage}
-      />
       {service.source === 'image' ? (
         <ImageSourceSection
           service={service}
@@ -281,7 +275,7 @@ function sameEnv(a: EnvVars, b: EnvVars): boolean {
   return true;
 }
 
-function EnvVarsSection({
+export function EnvVarsSection({
   service,
   workspaceSlug,
   projectSlug,
