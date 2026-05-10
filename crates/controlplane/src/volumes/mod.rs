@@ -3,7 +3,10 @@ pub mod routes;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::PgPool;
+use std::time::Duration;
 
+use crate::credentials;
+use crate::crypto::MasterKey;
 use crate::error::{ApiError, ApiResult};
 
 /// Serialized shape for UI + API. `mount_path` and `attached_*` are
@@ -88,6 +91,46 @@ pub async fn fetch_for_service(pool: &PgPool, service_id: &str) -> ApiResult<Opt
     .fetch_optional(pool)
     .await?;
     Ok(row)
+}
+
+/// Delete the provider-side volume, then remove the local row.
+///
+/// If the workspace no longer has a Hetzner token, this preserves the
+/// existing API behavior and only removes the local row.
+pub async fn delete_backing_volume_and_row(
+    pool: &PgPool,
+    master_key: &MasterKey,
+    workspace_id: &str,
+    row: &VolumeRow,
+) -> ApiResult<()> {
+    // If physically attached to a node, detach first so Hetzner lets us
+    // delete it. Non-fatal if detach returns an error — the delete
+    // itself will surface any real problem.
+    if let Some(hz_id) = row.hetzner_volume_id {
+        let token = credentials::first_hetzner_token(pool, master_key, workspace_id)
+            .await
+            .map_err(ApiError::Internal)?;
+        if let Some(token) = token {
+            let client = driftbase_hetzner::HetznerClient::new(&token);
+            if row.attached_node_id.is_some() {
+                if let Ok(action) = client.detach_volume(hz_id).await {
+                    let _ = client
+                        .wait_for_action(action.id, Duration::from_secs(60))
+                        .await;
+                }
+            }
+            client
+                .delete_volume(hz_id)
+                .await
+                .map_err(|e| ApiError::Internal(anyhow::anyhow!("hetzner delete_volume: {e}")))?;
+        }
+    }
+
+    sqlx::query("DELETE FROM volumes WHERE id = $1")
+        .bind(&row.id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Validate a container-side mount path. Absolute, no `..`, reasonable

@@ -2,9 +2,9 @@ use axum::extract::{Path, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
+use driftbase_common::Id;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
-use driftbase_common::Id;
 
 use crate::auth::AuthUser;
 use crate::builds;
@@ -509,6 +509,26 @@ async fn delete(
     let ctx = membership::resolve(state.pool(), &slug, &auth.user_id).await?;
     membership::require(&ctx, Role::Admin)?;
     let project_id = resolve_project(state.pool(), &ctx.workspace_id, &project_slug).await?;
+
+    let service_id: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM services WHERE project_id = $1 AND slug = $2")
+            .bind(project_id.to_string())
+            .bind(&service_slug)
+            .fetch_optional(state.pool())
+            .await?;
+    let Some((service_id,)) = service_id else {
+        return Err(ApiError::NotFound);
+    };
+
+    if let Some(volume) = crate::volumes::fetch_for_service(state.pool(), &service_id).await? {
+        crate::volumes::delete_backing_volume_and_row(
+            state.pool(),
+            state.master_key(),
+            &ctx.workspace_id.to_string(),
+            &volume,
+        )
+        .await?;
+    }
 
     let res = sqlx::query("DELETE FROM services WHERE project_id = $1 AND slug = $2")
         .bind(project_id.to_string())

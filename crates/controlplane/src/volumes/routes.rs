@@ -1,10 +1,10 @@
 use axum::extract::{Path, State};
 use axum::routing::{delete, get};
 use axum::{Json, Router};
-use serde::Deserialize;
-use std::time::Duration;
 use driftbase_common::Id;
 use driftbase_hetzner::{CreateVolumeRequest, HetznerClient};
+use serde::Deserialize;
+use std::time::Duration;
 
 use crate::auth::AuthUser;
 use crate::credentials;
@@ -189,37 +189,13 @@ async fn remove(
         ));
     }
 
-    // If physically attached to a node, detach first so Hetzner lets us
-    // delete it. Non-fatal if detach returns an error — the delete
-    // itself will surface any real problem.
-    if let Some(hz_id) = row.hetzner_volume_id {
-        let token = credentials::first_hetzner_token(
-            state.pool(),
-            state.master_key(),
-            &ctx.workspace_id.to_string(),
-        )
-        .await
-        .map_err(ApiError::Internal)?;
-        if let Some(token) = token {
-            let client = HetznerClient::new(&token);
-            if row.attached_node_id.is_some() {
-                if let Ok(action) = client.detach_volume(hz_id).await {
-                    let _ = client
-                        .wait_for_action(action.id, Duration::from_secs(60))
-                        .await;
-                }
-            }
-            client
-                .delete_volume(hz_id)
-                .await
-                .map_err(|e| ApiError::Internal(anyhow::anyhow!("hetzner delete_volume: {e}")))?;
-        }
-    }
-
-    sqlx::query("DELETE FROM volumes WHERE id = $1")
-        .bind(&id)
-        .execute(state.pool())
-        .await?;
+    volumes::delete_backing_volume_and_row(
+        state.pool(),
+        state.master_key(),
+        &ctx.workspace_id.to_string(),
+        &row,
+    )
+    .await?;
     Ok(())
 }
 
