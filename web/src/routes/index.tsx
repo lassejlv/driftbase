@@ -70,13 +70,13 @@ function Landing() {
       </dl>
 
       <a
-        href="https://github.com/lassejlv/driftbase"
+        href="https://github.com/driftbase/driftbase"
         target="_blank"
         rel="noreferrer"
         className="mt-16 inline-flex items-center gap-1.5 text-xs text-[var(--color-muted)] hover:text-[var(--color-fg)]"
       >
         <Github className="h-3.5 w-3.5" />
-        github.com/lassejlv/driftbase
+        github.com/driftbase/driftbase
       </a>
     </section>
   );

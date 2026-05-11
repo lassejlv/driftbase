@@ -204,11 +204,11 @@ mod tests {
     #[test]
     fn extracts_digest_from_image_ref() {
         assert_eq!(
-            digest_from_ref("ghcr.io/lassejlv/driftbase-agent@sha256:abc"),
+            digest_from_ref("ghcr.io/driftbase/agent@sha256:abc"),
             Some("sha256:abc".into())
         );
         assert_eq!(
-            digest_from_ref("ghcr.io/lassejlv/driftbase-agent:latest"),
+            digest_from_ref("ghcr.io/driftbase/agent:latest"),
             None
         );
     }
@@ -230,7 +230,7 @@ mod tests {
         rewrite_env_file(
             &path,
             "node.token",
-            Some("ghcr.io/lassejlv/driftbase-agent@sha256:new"),
+            Some("ghcr.io/driftbase/agent@sha256:new"),
         )
         .await
         .unwrap();
@@ -239,7 +239,7 @@ mod tests {
         assert!(updated.contains("DRIFTBASE_CONTROL_PLANE_URL=https://cp.example\n"));
         assert!(updated.contains("DRIFTBASE_NODE_TOKEN=node.token\n"));
         assert!(
-            updated.contains("DRIFTBASE_AGENT_IMAGE=ghcr.io/lassejlv/driftbase-agent@sha256:new\n")
+            updated.contains("DRIFTBASE_AGENT_IMAGE=ghcr.io/driftbase/agent@sha256:new\n")
         );
         let _ = tokio::fs::remove_file(&path).await;
     }

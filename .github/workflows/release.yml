@@ -69,8 +69,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/controlplane:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}/controlplane:latest
+            ghcr.io/${{ github.repository_owner }}/controlplane:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/controlplane:latest
       - name: Build & push agent
         uses: useblacksmith/build-push-action@v2
         with:
@@ -79,5 +79,5 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/agent:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}/agent:latest
+            ghcr.io/${{ github.repository_owner }}/agent:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/agent:latest
