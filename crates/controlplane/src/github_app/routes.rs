@@ -56,8 +56,10 @@ async fn start(
 #[derive(Deserialize)]
 struct CallbackQuery {
     code: Option<String>,
-    state: String,
+    state: Option<String>,
     installation_id: Option<i64>,
+    #[allow(dead_code)]
+    setup_action: Option<String>,
 }
 
 async fn callback(
@@ -66,21 +68,52 @@ async fn callback(
     Query(query): Query<CallbackQuery>,
 ) -> ApiResult<Redirect> {
     let config = github_app::require_config(state.config())?;
-    let verified = github_app::verify_state(state.master_key(), &query.state)?;
-    if verified.user_id != auth.user_id.to_string() {
-        return Err(ApiError::Unauthorized);
-    }
-    let ctx = membership::resolve(state.pool(), &verified.workspace_slug, &auth.user_id).await?;
-    membership::require(&ctx, Role::Admin)?;
-    if ctx.workspace_id.to_string() != verified.workspace_id {
-        return Err(ApiError::Unauthorized);
-    }
 
     let Some(expected_installation_id) = query.installation_id else {
         return Err(ApiError::Validation(
             "GitHub did not return an installation id".into(),
         ));
     };
+
+    let verified_state = match query.state.as_deref().filter(|s| !s.is_empty()) {
+        Some(state_token) => {
+            let verified = github_app::verify_state(state.master_key(), state_token)?;
+            if verified.user_id != auth.user_id.to_string() {
+                return Err(ApiError::Unauthorized);
+            }
+            Some(verified)
+        }
+        None => None,
+    };
+
+    let workspace_slug = match verified_state.as_ref() {
+        Some(verified) => verified.workspace_slug.clone(),
+        None => {
+            let row: Option<(String,)> = crate::db::query_tuple(
+                "SELECT w.slug \
+                 FROM github_installations gi \
+                 JOIN workspaces w ON w.id = gi.workspace_id \
+                 JOIN workspace_members m ON m.workspace_id = gi.workspace_id \
+                 WHERE gi.installation_id = $1 AND m.user_id = $2 \
+                   AND m.role IN ('owner', 'admin') \
+                 LIMIT 1",
+            )
+            .bind(expected_installation_id)
+            .bind(auth.user_id.to_string())
+            .fetch_optional(state.pool())
+            .await
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("{e}")))?;
+            row.ok_or(ApiError::NotFound)?.0
+        }
+    };
+
+    let ctx = membership::resolve(state.pool(), &workspace_slug, &auth.user_id).await?;
+    membership::require(&ctx, Role::Admin)?;
+    if let Some(verified) = verified_state.as_ref() {
+        if ctx.workspace_id.to_string() != verified.workspace_id {
+            return Err(ApiError::Unauthorized);
+        }
+    }
 
     let installation = if let Some(code) = query.code.as_deref().filter(|c| !c.is_empty()) {
         let token = github_app::exchange_oauth_code(config, code)
@@ -117,7 +150,7 @@ async fn callback(
     Ok(Redirect::temporary(&format!(
         "{}/w/{}/credentials?github=connected",
         state.config().public_url.trim_end_matches('/'),
-        github_app::percent_encode(&verified.workspace_slug)
+        github_app::percent_encode(&workspace_slug)
     )))
 }
 
