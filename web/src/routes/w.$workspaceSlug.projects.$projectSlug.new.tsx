@@ -1,6 +1,6 @@
 import { createFileRoute, Link, redirect, useNavigate } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
-import { useMemo, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { ArrowLeft, Container, GitBranch, Plus, Trash2 } from 'lucide-react';
 import { meQuery } from '@/lib/auth';
 import { projectQuery } from '@/lib/projects';
@@ -9,7 +9,6 @@ import {
   useVariableReferences,
   type CreateServiceInput,
 } from '@/lib/services';
-import { useCredentials } from '@/lib/credentials';
 import { githubRepositoriesQuery, type GitHubRepositorySummary } from '@/lib/github';
 import { usePublicSettings } from '@/lib/settings';
 import { canWrite, workspaceQuery } from '@/lib/workspaces';
@@ -25,7 +24,6 @@ import {
   Stack,
 } from '@/components/ui';
 import type {
-  CredentialSummary,
   PortMap,
   RestartPolicy,
   VariableReferencesResponse,
@@ -56,7 +54,6 @@ function NewServicePage() {
   const { workspaceSlug, projectSlug } = Route.useParams();
   const workspace = useQuery(workspaceQuery(workspaceSlug));
   const project = useQuery(projectQuery(workspaceSlug, projectSlug));
-  const credentials = useCredentials(workspaceSlug);
   const settings = usePublicSettings();
   const githubRepositories = useQuery({
     ...githubRepositoriesQuery(workspaceSlug),
@@ -80,10 +77,7 @@ function NewServicePage() {
   const [builder, setBuilder] = useState<'dockerfile' | 'railpack'>('dockerfile');
   const [dockerfilePath, setDockerfilePath] = useState('Dockerfile');
   const [rootDir, setRootDir] = useState('.');
-  const [registryRepo, setRegistryRepo] = useState('');
-  const [githubCredId, setGithubCredId] = useState('');
   const [githubRepoKey, setGithubRepoKey] = useState('');
-  const [registryCredId, setRegistryCredId] = useState('');
 
   const [ports, setPorts] = useState<PortRow[]>([]);
   const [envRows, setEnvRows] = useState<EnvRow[]>([]);
@@ -95,14 +89,6 @@ function NewServicePage() {
 
   const [error, setError] = useState<string | null>(null);
 
-  const registryCreds = useMemo(
-    () => (credentials.data ?? []).filter((c) => c.kind === 'registry'),
-    [credentials.data],
-  );
-  const githubCreds = useMemo(
-    () => (credentials.data ?? []).filter((c) => c.kind === 'github_pat'),
-    [credentials.data],
-  );
   const githubRepos = githubRepositories.data ?? [];
 
   function onNameChange(next: string) {
@@ -141,7 +127,6 @@ function NewServicePage() {
         if (!selectedGithubRepo && !gitRepo.trim()) {
           throw new Error('Git repo URL or GitHub App repository is required');
         }
-        if (!registryCredId) throw new Error('Pick a registry credential');
         base.git_repo = selectedGithubRepo?.clone_url ?? gitRepo.trim();
         base.git_branch = gitBranch.trim() || 'main';
         base.builder = builder;
@@ -149,9 +134,6 @@ function NewServicePage() {
         if (builder === 'dockerfile') {
           base.dockerfile_path = dockerfilePath.trim() || 'Dockerfile';
         }
-        if (registryRepo.trim()) base.registry_repo = registryRepo.trim();
-        base.registry_credential_id = registryCredId;
-        if (githubCredId) base.github_credential_id = githubCredId;
         if (selectedGithubRepo) {
           base.github_installation_id = selectedGithubRepo.installation_id;
           base.github_repository_id = selectedGithubRepo.repository_id;
@@ -284,7 +266,7 @@ function NewServicePage() {
                   }
                 }}
               >
-                <option value="">— manual URL / PAT fallback —</option>
+                <option value="">— manual URL —</option>
                 {githubRepos.map((repo) => (
                   <option key={githubRepoValue(repo)} value={githubRepoValue(repo)}>
                     {repo.full_name}
@@ -355,57 +337,6 @@ function NewServicePage() {
               />
             </Field>
           ) : null}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Field
-              label="Registry credential"
-              htmlFor="svc-registry-cred"
-              hint={
-                registryCreds.length === 0
-                  ? 'Add a "registry" credential first (in Credentials).'
-                  : 'Where Driftbase pushes the built image.'
-              }
-            >
-              <Select
-                id="svc-registry-cred"
-                required
-                value={registryCredId}
-                onChange={(e) => setRegistryCredId(e.target.value)}
-              >
-                <option value="">— select —</option>
-                {registryCreds.map((c) => (
-                  <CredOption key={c.id} c={c} />
-                ))}
-              </Select>
-            </Field>
-            <Field
-              label="GitHub PAT"
-              htmlFor="svc-github-cred"
-              hint="Legacy fallback for private repos not connected through the GitHub App."
-            >
-              <Select
-                id="svc-github-cred"
-                value={githubCredId}
-                onChange={(e) => setGithubCredId(e.target.value)}
-              >
-                <option value="">— none —</option>
-                {githubCreds.map((c) => (
-                  <CredOption key={c.id} c={c} />
-                ))}
-              </Select>
-            </Field>
-          </div>
-          <Field
-            label="Registry path override"
-            htmlFor="svc-registry-repo"
-            hint="Leave empty to use the default registry/workspace/service layout."
-          >
-            <Input
-              id="svc-registry-repo"
-              placeholder="registry.driftbase.app/team/api"
-              value={registryRepo}
-              onChange={(e) => setRegistryRepo(e.target.value)}
-            />
-          </Field>
         </Section>
       )}
 
@@ -785,19 +716,6 @@ function NumberField({
         <span className="text-xs text-[var(--color-muted)]">{suffix}</span>
       </div>
     </Field>
-  );
-}
-
-function CredOption({ c }: { c: CredentialSummary }) {
-  const url =
-    typeof c.metadata === 'object' && c.metadata && 'url' in c.metadata
-      ? String((c.metadata as Record<string, unknown>).url ?? '')
-      : '';
-  return (
-    <option value={c.id}>
-      {c.name}
-      {url ? ` · ${url}` : ''}
-    </option>
   );
 }
 

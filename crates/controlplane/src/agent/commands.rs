@@ -184,6 +184,7 @@ pub async fn mark_acked(
                      THEN jsonb_set(payload, '{registry}', (payload->'registry') - 'password', false) \
                      ELSE payload \
                   END) - 'github_pat' \
+                  - 'github_token' \
              WHEN kind = 'pull_and_run' THEN \
                  CASE \
                      WHEN payload ? 'registry' AND jsonb_typeof(payload->'registry') = 'object' \
@@ -279,7 +280,6 @@ pub struct BuildPayload<'a> {
     pub dockerfile_path: Option<&'a str>,
     pub root_dir: &'a str,
     pub image_tag: &'a str,
-    pub github_credential_id: Option<&'a str>,
     pub github_installation_id: Option<i64>,
     pub github_repository_id: Option<i64>,
     pub registry: Option<RegistryAuth<'a>>,
@@ -306,7 +306,6 @@ pub fn build_payload(p: &BuildPayload<'_>) -> JsonValue {
         "dockerfile_path": p.dockerfile_path,
         "root_dir": p.root_dir,
         "image_tag": p.image_tag,
-        "github_credential_id": p.github_credential_id,
         "github_installation_id": p.github_installation_id,
         "github_repository_id": p.github_repository_id,
         "registry": registry,
@@ -324,11 +323,6 @@ async fn hydrate_command_payload(
     }
 
     let registry_credential_id = registry_credential_id(&command.payload);
-    let github_credential_id = if command.kind == "build" {
-        string_field(&command.payload, "github_credential_id")
-    } else {
-        None
-    };
     let github_installation_id = if command.kind == "build" {
         i64_field(&command.payload, "github_installation_id")
     } else {
@@ -339,10 +333,7 @@ async fn hydrate_command_payload(
     } else {
         None
     };
-    if registry_credential_id.is_none()
-        && github_credential_id.is_none()
-        && github_installation_id.is_none()
-    {
+    if registry_credential_id.is_none() && github_installation_id.is_none() {
         return Ok(());
     }
 
@@ -371,24 +362,13 @@ async fn hydrate_command_payload(
         inject_registry_password(&mut command.payload, &credential.secret)?;
     }
 
-    if let Some(credential_id) = github_credential_id {
-        let credential =
-            crate::credentials::fetch_decrypted(pool, master_key, &workspace_id, &credential_id)
-                .await?
-                .ok_or_else(|| anyhow!("github credential {credential_id} not found"))?;
-        if credential.kind != "github_pat" {
-            return Err(anyhow!("credential {credential_id} is not a github_pat"));
-        }
-        inject_github_pat(&mut command.payload, &credential.secret)?;
-    }
-
     if let (Some(installation_id), Some(repository_id)) =
         (github_installation_id, github_repository_id)
     {
         let token =
             crate::github_app::clone_token_for_repository(config, installation_id, repository_id)
                 .await?;
-        inject_github_pat(&mut command.payload, &token)?;
+        inject_github_token(&mut command.payload, &token)?;
     } else if github_installation_id.is_some() || github_repository_id.is_some() {
         return Err(anyhow!(
             "build payload must include both github_installation_id and github_repository_id"
@@ -424,13 +404,6 @@ fn registry_credential_id(payload: &JsonValue) -> Option<String> {
         .map(str::to_string)
 }
 
-fn string_field(payload: &JsonValue, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-}
-
 fn i64_field(payload: &JsonValue, key: &str) -> Option<i64> {
     payload.get(key).and_then(|v| v.as_i64())
 }
@@ -448,12 +421,16 @@ fn inject_registry_password(payload: &mut JsonValue, password: &str) -> Result<(
     Ok(())
 }
 
-fn inject_github_pat(payload: &mut JsonValue, pat: &str) -> Result<()> {
+fn inject_github_token(payload: &mut JsonValue, token: &str) -> Result<()> {
     let object = payload
         .as_object_mut()
         .ok_or_else(|| anyhow!("build payload is not an object"))
         .context("injecting github credential")?;
-    object.insert("github_pat".to_string(), JsonValue::String(pat.to_string()));
+    object.insert(
+        "github_token".to_string(),
+        JsonValue::String(token.to_string()),
+    );
+    object.remove("github_pat");
     object.remove("github_credential_id");
     Ok(())
 }
@@ -495,7 +472,6 @@ mod tests {
             dockerfile_path: None,
             root_dir: ".",
             image_tag: "registry/ws/svc:build",
-            github_credential_id: Some("github_cred"),
             github_installation_id: Some(123),
             github_repository_id: Some(456),
             registry: Some(RegistryAuth {
@@ -505,18 +481,19 @@ mod tests {
             }),
         });
 
-        assert_eq!(payload["github_credential_id"], "github_cred");
         assert_eq!(payload["github_installation_id"], 123);
         assert_eq!(payload["github_repository_id"], 456);
         assert_eq!(payload["registry"]["credential_id"], "registry_cred");
         assert!(payload.get("github_pat").is_none());
+        assert!(payload.get("github_token").is_none());
         assert!(payload["registry"].get("password").is_none());
     }
 
     #[test]
     fn injectors_restore_agent_wire_shape_without_credential_ids() {
         let mut payload = json!({
-            "github_credential_id": "github_cred",
+            "github_installation_id": 123,
+            "github_repository_id": 456,
             "registry": {
                 "url": "registry",
                 "username": "robot",
@@ -525,11 +502,12 @@ mod tests {
         });
 
         inject_registry_password(&mut payload, "registry-secret").unwrap();
-        inject_github_pat(&mut payload, "github-secret").unwrap();
+        inject_github_token(&mut payload, "github-secret").unwrap();
 
         assert_eq!(payload["registry"]["password"], "registry-secret");
-        assert_eq!(payload["github_pat"], "github-secret");
+        assert_eq!(payload["github_token"], "github-secret");
         assert!(payload["registry"].get("credential_id").is_none());
         assert!(payload.get("github_credential_id").is_none());
+        assert!(payload.get("github_pat").is_none());
     }
 }

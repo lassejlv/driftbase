@@ -145,6 +145,8 @@ CREATE TABLE nodes (
     total_memory_mb   INTEGER NOT NULL,
     total_disk_mb     INTEGER NOT NULL,
     labels            JSONB NOT NULL DEFAULT '{}'::jsonb,
+    node_role         TEXT NOT NULL DEFAULT 'runtime',
+    idle_ttl_seconds  INTEGER,
     agent_version     TEXT,
     last_seen_at      TIMESTAMPTZ,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -152,6 +154,7 @@ CREATE TABLE nodes (
 );
 CREATE INDEX nodes_workspace_idx ON nodes(workspace_id);
 CREATE INDEX nodes_status_idx ON nodes(status);
+CREATE INDEX nodes_workspace_role_status_idx ON nodes(workspace_id, node_role, status);
 
 -- Deployments (one row per service instance lifetime)
 CREATE TABLE deployments (

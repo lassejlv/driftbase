@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use driftbase_common::Id;
 use driftbase_hetzner::{pick_server_type, CreateServerRequest, HetznerClient, ServerType};
 use sea_orm::DatabaseConnection;
+use serde_json::Value as JsonValue;
 use std::time::Duration;
 
 use crate::agent::tokens;
@@ -47,6 +48,8 @@ pub async fn provision(
     location: &str,
     size: NodeSize<'_>,
     ssh_key_ids: Vec<i64>,
+    node_role: &str,
+    idle_ttl_seconds: Option<i32>,
 ) -> Result<ProvisionResult> {
     let client = HetznerClient::new(hetzner_token);
     let types = client
@@ -104,8 +107,9 @@ pub async fn provision(
     crate::db::query(
         "INSERT INTO nodes (id, workspace_id, name, provider, status, \
                             total_cpu_millis, total_memory_mb, total_disk_mb, \
-                            bootstrap_token_hash, hetzner_location, hetzner_server_type) \
-         VALUES ($1, $2, $3, 'hetzner', 'provisioning', $4, $5, $6, $7, $8, $9)",
+                            bootstrap_token_hash, hetzner_location, hetzner_server_type, \
+                            node_role, idle_ttl_seconds) \
+         VALUES ($1, $2, $3, 'hetzner', 'provisioning', $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(node_id.to_string())
     .bind(workspace_id)
@@ -116,9 +120,12 @@ pub async fn provision(
     .bind(tokens::fingerprint(&bootstrap))
     .bind(location)
     .bind(&st.name)
+    .bind(node_role)
+    .bind(idle_ttl_seconds)
     .execute(pool)
     .await?;
 
+    let hetzner_labels = hetzner_labels(workspace_id, &node_id.to_string(), node_role);
     let req = CreateServerRequest {
         name: &name,
         server_type: &st.name,
@@ -127,10 +134,7 @@ pub async fn provision(
         ssh_keys: ssh_key_ids,
         user_data: &user_data,
         start_after_create: true,
-        labels: Some(serde_json::json!({
-            "driftbase.workspace_id": workspace_id,
-            "driftbase.node_id": node_id.to_string(),
-        })),
+        labels: Some(hetzner_labels),
     };
 
     let created = match client.create_server(&req).await {
@@ -176,6 +180,26 @@ pub async fn provision(
         node_id,
         hetzner_server_id: created.server.id,
     })
+}
+
+fn hetzner_labels(workspace_id: &str, node_id: &str, node_role: &str) -> JsonValue {
+    let mut labels = serde_json::Map::from_iter([
+        (
+            "driftbase.workspace_id".to_string(),
+            JsonValue::String(workspace_id.to_string()),
+        ),
+        (
+            "driftbase.node_id".to_string(),
+            JsonValue::String(node_id.to_string()),
+        ),
+    ]);
+    if node_role == "builder" {
+        labels.insert(
+            "driftbase.role".to_string(),
+            JsonValue::String("builder".to_string()),
+        );
+    }
+    JsonValue::Object(labels)
 }
 
 fn pick_fit(types: &[ServerType], location: &str, need: &Resources) -> Result<ServerType> {

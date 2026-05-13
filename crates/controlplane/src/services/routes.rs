@@ -42,8 +42,7 @@ pub fn router() -> Router<AppState> {
 
 const SERVICE_COLUMNS: &str = "id, slug, name, source, image_ref, env_vars, ports, resources, \
      replicas, restart_policy, git_repo, git_branch, git_commit, \
-     dockerfile_path, root_dir, builder, registry_repo, \
-     github_credential_id, registry_credential_id, github_installation_id, \
+     dockerfile_path, root_dir, builder, github_installation_id, \
      github_repository_id, github_repository_full_name, github_auto_deploy, \
      github_statuses_enabled, created_at, updated_at";
 
@@ -66,9 +65,6 @@ pub struct ServiceSummary {
     pub dockerfile_path: Option<String>,
     pub root_dir: Option<String>,
     pub builder: String,
-    pub registry_repo: Option<String>,
-    pub github_credential_id: Option<Id>,
-    pub registry_credential_id: Option<Id>,
     pub github_installation_id: Option<i64>,
     pub github_repository_id: Option<i64>,
     pub github_repository_full_name: Option<String>,
@@ -96,9 +92,6 @@ struct ServiceRow {
     dockerfile_path: Option<String>,
     root_dir: Option<String>,
     builder: String,
-    registry_repo: Option<String>,
-    github_credential_id: Option<String>,
-    registry_credential_id: Option<String>,
     github_installation_id: Option<i64>,
     github_repository_id: Option<i64>,
     github_repository_full_name: Option<String>,
@@ -136,17 +129,6 @@ impl TryFrom<ServiceRow> for ServiceSummary {
             dockerfile_path: r.dockerfile_path,
             root_dir: r.root_dir,
             builder: r.builder,
-            registry_repo: r.registry_repo,
-            github_credential_id: r
-                .github_credential_id
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e: ulid::DecodeError| ApiError::Internal(anyhow::anyhow!("{e}")))?,
-            registry_credential_id: r
-                .registry_credential_id
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e: ulid::DecodeError| ApiError::Internal(anyhow::anyhow!("{e}")))?,
             github_installation_id: r.github_installation_id,
             github_repository_id: r.github_repository_id,
             github_repository_full_name: r.github_repository_full_name,
@@ -166,10 +148,6 @@ impl ServiceSummary {
                 .into_keys()
                 .map(|key| (key, "********".to_string()))
                 .collect();
-        }
-        if !role.at_least(Role::Admin) {
-            self.github_credential_id = None;
-            self.registry_credential_id = None;
         }
         self
     }
@@ -286,62 +264,6 @@ fn trim_opt(s: Option<String>) -> Option<String> {
     s.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
-fn validate_github_repo_for_pat(repo: &str) -> ApiResult<()> {
-    let repo = repo.trim();
-    if repo.chars().any(|ch| ch.is_control()) {
-        return Err(ApiError::Validation("invalid git_repo".into()));
-    }
-    let Some(rest) = repo.strip_prefix("https://github.com/") else {
-        return Err(ApiError::Validation(
-            "github credentials can only be used with https://github.com repositories".into(),
-        ));
-    };
-    let path = rest
-        .split(['?', '#'])
-        .next()
-        .unwrap_or("")
-        .trim_end_matches(".git");
-    let mut parts = path.split('/');
-    let Some(owner) = parts.next() else {
-        return Err(ApiError::Validation("invalid github repository".into()));
-    };
-    let Some(name) = parts.next() else {
-        return Err(ApiError::Validation("invalid github repository".into()));
-    };
-    if parts.next().is_some()
-        || owner.is_empty()
-        || name.is_empty()
-        || owner == "."
-        || owner == ".."
-        || name == "."
-        || name == ".."
-    {
-        return Err(ApiError::Validation("invalid github repository".into()));
-    }
-    Ok(())
-}
-
-async fn validate_credential_kind(
-    pool: &sea_orm::DatabaseConnection,
-    workspace_id: &Id,
-    credential_id: &str,
-    expected_kind: &str,
-) -> ApiResult<()> {
-    let row: Option<(String,)> =
-        crate::db::query_tuple("SELECT kind FROM credentials WHERE id = $1 AND workspace_id = $2")
-            .bind(credential_id)
-            .bind(workspace_id.to_string())
-            .fetch_optional(pool)
-            .await?;
-    let Some((kind,)) = row else {
-        return Err(ApiError::Validation("credential not found".into()));
-    };
-    if kind != expected_kind {
-        return Err(ApiError::Validation("credential kind mismatch".into()));
-    }
-    Ok(())
-}
-
 async fn ensure_github_repo_available(
     pool: &sea_orm::DatabaseConnection,
     workspace_id: &str,
@@ -423,9 +345,6 @@ async fn create(
         dockerfile_path,
         root_dir,
         builder,
-        registry_repo,
-        github_credential_id,
-        registry_credential_id,
         github_installation_id,
         github_repository_id,
         mut github_repository_full_name,
@@ -456,9 +375,6 @@ async fn create(
             dockerfile_path = None;
             root_dir = None;
             builder = "dockerfile".to_string();
-            registry_repo = None;
-            github_credential_id = None;
-            registry_credential_id = None;
             github_installation_id = None;
             github_repository_id = None;
             github_repository_full_name = None;
@@ -509,9 +425,19 @@ async fn create(
             };
             builder = chosen_builder;
             root_dir = Some(trim_opt(req.root_dir).unwrap_or_else(|| ".".into()));
-            registry_repo = normalize_registry_repo(req.registry_repo);
-            github_credential_id = trim_opt(req.github_credential_id);
-            registry_credential_id = trim_opt(req.registry_credential_id);
+            if trim_opt(req.registry_repo).is_some()
+                || trim_opt(req.registry_credential_id).is_some()
+            {
+                return Err(ApiError::Validation(
+                    "Registry path and credentials are managed by Driftbase".into(),
+                ));
+            }
+            if trim_opt(req.github_credential_id).is_some() {
+                return Err(ApiError::Validation(
+                    "GitHub PAT credentials are no longer supported; connect the GitHub App instead"
+                        .into(),
+                ));
+            }
             if github_installation_id.is_some() != github_repository_id.is_some() {
                 return Err(ApiError::Validation(
                     "github_installation_id and github_repository_id must be set together".into(),
@@ -523,21 +449,6 @@ async fn create(
         _ => unreachable!(),
     }
 
-    if github_credential_id.is_some() || registry_credential_id.is_some() {
-        membership::require(&ctx, Role::Admin)?;
-    }
-    if let Some(credential_id) = github_credential_id.as_deref() {
-        let repo = git_repo.as_deref().ok_or_else(|| {
-            ApiError::Validation("git_repo is required when using a github credential".into())
-        })?;
-        validate_github_repo_for_pat(repo)?;
-        validate_credential_kind(state.pool(), &ctx.workspace_id, credential_id, "github_pat")
-            .await?;
-    }
-    if let Some(credential_id) = registry_credential_id.as_deref() {
-        validate_credential_kind(state.pool(), &ctx.workspace_id, credential_id, "registry")
-            .await?;
-    }
     ensure_github_repo_available(
         state.pool(),
         &ctx.workspace_id.to_string(),
@@ -553,10 +464,9 @@ async fn create(
         "INSERT INTO services ( \
             id, project_id, slug, name, source, image_ref, env_vars, ports, resources, \
             replicas, restart_policy, git_repo, git_branch, dockerfile_path, \
-            root_dir, builder, registry_repo, github_credential_id, registry_credential_id, \
-            github_installation_id, github_repository_id, github_repository_full_name, \
+            root_dir, builder, github_installation_id, github_repository_id, github_repository_full_name, \
             github_auto_deploy, github_statuses_enabled \
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24) \
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) \
          ON CONFLICT (project_id, slug) DO NOTHING \
          RETURNING {cols}",
         cols = SERVICE_COLUMNS,
@@ -578,9 +488,6 @@ async fn create(
         .bind(dockerfile_path.as_deref())
         .bind(root_dir.as_deref())
         .bind(&builder)
-        .bind(registry_repo.as_deref())
-        .bind(github_credential_id.as_deref())
-        .bind(registry_credential_id.as_deref())
         .bind(github_installation_id)
         .bind(github_repository_id)
         .bind(github_repository_full_name.as_deref())
@@ -688,60 +595,18 @@ async fn update(
         }
     }
 
-    let registry_repo = normalize_registry_repo(req.registry_repo);
     let mut git_repo = trim_opt(req.git_repo);
-    let github_credential_id = trim_opt(req.github_credential_id);
-    let registry_credential_id = trim_opt(req.registry_credential_id);
-    let mut github_repository_full_name = trim_opt(req.github_repository_full_name);
-
-    if git_repo.is_some() || github_credential_id.is_some() || registry_credential_id.is_some() {
-        let current: Option<(Option<String>, Option<String>)> = crate::db::query_tuple(
-            "SELECT git_repo, github_credential_id FROM services \
-             WHERE project_id = $1 AND slug = $2",
-        )
-        .bind(project_id.to_string())
-        .bind(&service_slug)
-        .fetch_optional(state.pool())
-        .await?;
-        let Some((current_git_repo, current_github_credential_id)) = current else {
-            return Err(ApiError::NotFound);
-        };
-
-        if github_credential_id.is_some()
-            || registry_credential_id.is_some()
-            || (git_repo.is_some() && current_github_credential_id.is_some())
-        {
-            membership::require(&ctx, Role::Admin)?;
-        }
-
-        let effective_github_credential_id = github_credential_id
-            .as_deref()
-            .or(current_github_credential_id.as_deref());
-        if let Some(credential_id) = effective_github_credential_id {
-            let effective_git_repo = git_repo
-                .as_deref()
-                .or(current_git_repo.as_deref())
-                .ok_or_else(|| {
-                    ApiError::Validation(
-                        "git_repo is required when using a github credential".into(),
-                    )
-                })?;
-            validate_github_repo_for_pat(effective_git_repo)?;
-            if github_credential_id.is_some() {
-                validate_credential_kind(
-                    state.pool(),
-                    &ctx.workspace_id,
-                    credential_id,
-                    "github_pat",
-                )
-                .await?;
-            }
-        }
-        if let Some(credential_id) = registry_credential_id.as_deref() {
-            validate_credential_kind(state.pool(), &ctx.workspace_id, credential_id, "registry")
-                .await?;
-        }
+    if trim_opt(req.registry_repo).is_some() || trim_opt(req.registry_credential_id).is_some() {
+        return Err(ApiError::Validation(
+            "Registry path and credentials are managed by Driftbase".into(),
+        ));
     }
+    if trim_opt(req.github_credential_id).is_some() {
+        return Err(ApiError::Validation(
+            "GitHub PAT credentials are no longer supported; connect the GitHub App instead".into(),
+        ));
+    }
+    let mut github_repository_full_name = trim_opt(req.github_repository_full_name);
 
     if let (Some(installation_id), Some(repository_id)) =
         (req.github_installation_id, req.github_repository_id)
@@ -800,16 +665,13 @@ async fn update(
             dockerfile_path = COALESCE($10, dockerfile_path), \
             root_dir = COALESCE($11, root_dir), \
             builder = COALESCE($12, builder), \
-            registry_repo = COALESCE($13, registry_repo), \
-            github_credential_id = COALESCE($14, github_credential_id), \
-            registry_credential_id = COALESCE($15, registry_credential_id), \
-            github_installation_id = COALESCE($16, github_installation_id), \
-            github_repository_id = COALESCE($17, github_repository_id), \
-            github_repository_full_name = COALESCE($18, github_repository_full_name), \
-            github_auto_deploy = COALESCE($19, github_auto_deploy), \
-            github_statuses_enabled = COALESCE($20, github_statuses_enabled), \
+            github_installation_id = COALESCE($13, github_installation_id), \
+            github_repository_id = COALESCE($14, github_repository_id), \
+            github_repository_full_name = COALESCE($15, github_repository_full_name), \
+            github_auto_deploy = COALESCE($16, github_auto_deploy), \
+            github_statuses_enabled = COALESCE($17, github_statuses_enabled), \
             updated_at = now() \
-         WHERE project_id = $21 AND slug = $22 \
+         WHERE project_id = $18 AND slug = $19 \
          RETURNING {cols}",
         cols = SERVICE_COLUMNS,
     ))
@@ -825,9 +687,6 @@ async fn update(
     .bind(req.dockerfile_path.as_deref())
     .bind(req.root_dir.as_deref())
     .bind(req.builder.as_deref())
-    .bind(registry_repo.as_deref())
-    .bind(github_credential_id.as_deref())
-    .bind(registry_credential_id.as_deref())
     .bind(req.github_installation_id)
     .bind(req.github_repository_id)
     .bind(github_repository_full_name.as_deref())
@@ -842,10 +701,6 @@ async fn update(
     Ok(Json(
         ServiceSummary::try_from(row)?.redacted_for_role(ctx.role),
     ))
-}
-
-fn normalize_registry_repo(repo: Option<String>) -> Option<String> {
-    trim_opt(repo).map(|value| value.to_ascii_lowercase())
 }
 
 async fn delete(
@@ -962,9 +817,6 @@ async fn deploy(
                 summary.github_repository_id,
             )
             .await?;
-            if summary.github_credential_id.is_some() {
-                validate_github_repo_for_pat(summary.git_repo.as_deref().unwrap_or_default())?;
-            }
             // image_ref is filled in by the build; the deployment holds a
             // placeholder until then so the row insert (which NOT NULLs
             // image_ref) succeeds. The scheduler won't try to run it while

@@ -20,6 +20,7 @@ use crate::state::AppState;
 const BUILD_CPU_MILLIS: u32 = 1000;
 const BUILD_MEMORY_MB: u32 = 1024;
 const BUILD_DISK_MB: u32 = 2048;
+const BUILDER_IDLE_TTL_SECONDS: i64 = 3 * 60 * 60;
 
 /// Handle used to nudge the scheduler to wake early when new work arrives.
 #[derive(Clone, Default)]
@@ -229,11 +230,8 @@ struct QueuedBuild {
     builder: String,
     dockerfile_path: Option<String>,
     root_dir: String,
-    registry_repo: Option<String>,
-    github_credential_id: Option<String>,
     github_installation_id: Option<i64>,
     github_repository_id: Option<i64>,
-    registry_credential_id: Option<String>,
 }
 
 async fn fetch_queued_builds(pool: &DatabaseConnection) -> Result<Vec<QueuedBuild>> {
@@ -249,19 +247,15 @@ async fn fetch_queued_builds(pool: &DatabaseConnection) -> Result<Vec<QueuedBuil
         builder: String,
         dockerfile_path: Option<String>,
         root_dir: Option<String>,
-        registry_repo: Option<String>,
-        github_credential_id: Option<String>,
         github_installation_id: Option<i64>,
         github_repository_id: Option<i64>,
-        registry_credential_id: Option<String>,
     }
 
     let rows: Vec<Row> = crate::db::query_as(
         "SELECT b.id AS build_id, b.deployment_id, s.id AS service_id, w.id AS workspace_id, \
                 p.hetzner_location AS project_location, \
                 s.git_repo, s.git_branch, s.builder, s.dockerfile_path, s.root_dir, \
-                s.registry_repo, s.github_credential_id, s.registry_credential_id \
-                , s.github_installation_id, s.github_repository_id \
+                s.github_installation_id, s.github_repository_id \
          FROM builds b \
          JOIN services s ON s.id = b.service_id \
          JOIN projects p ON p.id = s.project_id \
@@ -292,57 +286,23 @@ async fn fetch_queued_builds(pool: &DatabaseConnection) -> Result<Vec<QueuedBuil
             builder: r.builder,
             dockerfile_path: r.dockerfile_path,
             root_dir: r.root_dir.unwrap_or_else(|| ".".into()),
-            registry_repo: r.registry_repo,
-            github_credential_id: r.github_credential_id,
             github_installation_id: r.github_installation_id,
             github_repository_id: r.github_repository_id,
-            registry_credential_id: r.registry_credential_id,
         });
     }
     Ok(out)
 }
 
 async fn dispatch_build(state: &AppState, b: QueuedBuild) -> Result<()> {
-    let registry_cred_id = b
-        .registry_credential_id
-        .clone()
-        .ok_or_else(|| anyhow!("git service missing registry credential — set one in Settings"))?;
-    let registry_cred = credentials::fetch_decrypted(
+    let registry = credentials::ensure_bundled_registry_credential(
         state.pool(),
+        state.config(),
         state.master_key(),
         &b.workspace_id,
-        &registry_cred_id,
     )
-    .await?
-    .ok_or_else(|| anyhow!("registry credential {registry_cred_id} not found"))?;
-    if registry_cred.kind != "registry" {
-        return Err(anyhow!(
-            "credential {registry_cred_id} is not a registry credential"
-        ));
-    }
-    let registry_meta = RegistryMeta::from_metadata(&registry_cred.metadata)?;
-
-    // Derive a repo name if the user didn't set one.
-    let registry_repo = b.registry_repo.clone().unwrap_or_else(|| {
-        format!(
-            "{host}/{ws}/{svc}",
-            host = registry_meta.url.to_ascii_lowercase(),
-            ws = b.workspace_id.to_ascii_lowercase(),
-            svc = b.service_id.to_ascii_lowercase()
-        )
-    });
+    .await?;
+    let registry_repo = bundled_registry_repo(&registry.url, &b.workspace_id, &b.service_id);
     let image_tag = format!("{registry_repo}:build-{id}", id = b.build_id);
-
-    if let Some(id) = &b.github_credential_id {
-        let cred =
-            credentials::fetch_decrypted(state.pool(), state.master_key(), &b.workspace_id, id)
-                .await?
-                .ok_or_else(|| anyhow!("github credential {id} not found"))?;
-        if cred.kind != "github_pat" {
-            return Err(anyhow!("credential {id} is not a github_pat"));
-        }
-    }
-    let github_credential_id = b.github_credential_id.as_deref();
 
     // Pick a builder node; any ready node works if no explicit builder pool.
     // If nothing's ready, trigger autoscale (same mechanism runtime deployments
@@ -362,6 +322,7 @@ async fn dispatch_build(state: &AppState, b: QueuedBuild) -> Result<()> {
                 &b.workspace_id,
                 &build_resources,
                 Some(&b.project_location),
+                ProvisionPurpose::Build,
             )
             .await?
             {
@@ -418,13 +379,12 @@ async fn dispatch_build(state: &AppState, b: QueuedBuild) -> Result<()> {
         dockerfile_path: b.dockerfile_path.as_deref(),
         root_dir: &b.root_dir,
         image_tag: &image_tag,
-        github_credential_id,
         github_installation_id: b.github_installation_id,
         github_repository_id: b.github_repository_id,
         registry: Some(RegistryAuth {
-            url: &registry_meta.url,
-            username: &registry_meta.username,
-            credential_id: &registry_cred_id,
+            url: &registry.url,
+            username: &registry.username,
+            credential_id: &registry.id,
         }),
     });
 
@@ -439,26 +399,38 @@ async fn dispatch_build(state: &AppState, b: QueuedBuild) -> Result<()> {
     Ok(())
 }
 
-struct RegistryMeta {
-    url: String,
-    username: String,
+fn bundled_registry_repo(registry_url: &str, workspace_id: &str, service_id: &str) -> String {
+    format!(
+        "{host}/{workspace}/{service}",
+        host = registry_url
+            .trim()
+            .trim_end_matches('/')
+            .to_ascii_lowercase(),
+        workspace = workspace_id.to_ascii_lowercase(),
+        service = service_id.to_ascii_lowercase(),
+    )
 }
 
-impl RegistryMeta {
-    fn from_metadata(m: &JsonValue) -> Result<Self> {
-        let url = m
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("registry credential metadata missing 'url'"))?;
-        let username = m
-            .get("username")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("registry credential metadata missing 'username'"))?;
-        Ok(Self {
-            url: url.to_string(),
-            username: username.to_string(),
-        })
-    }
+fn image_uses_bundled_registry(image: &str, registry_site: Option<&str>) -> bool {
+    let Some(registry_site) = registry_site else {
+        return false;
+    };
+    let Some(image_host) = image.trim().split('/').next() else {
+        return false;
+    };
+    registry_host(image_host) == registry_host(registry_site)
+}
+
+fn registry_host(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
 async fn pick_builder_node(
@@ -466,8 +438,8 @@ async fn pick_builder_node(
     workspace_id: &str,
     location: &str,
 ) -> Result<Option<NodeCapacity>> {
-    // If the workspace has any node tagged `role=builder`, prefer those
-    // exclusively. Otherwise any ready node will do.
+    // Build-first nodes are tagged `role=builder`; builds stay on that pool
+    // so runtime placements don't compete with transient build load.
     let rows: Vec<NodeCapacity> = crate::db::query_as(
         "SELECT n.id, n.provider, n.total_cpu_millis, n.total_memory_mb, n.total_disk_mb, \
                 COALESCE(SUM(a.cpu_millis), 0)::bigint AS used_cpu_millis, \
@@ -477,16 +449,7 @@ async fn pick_builder_node(
          LEFT JOIN node_allocations a ON a.node_id = n.id \
          WHERE n.workspace_id = $1 AND n.status = 'ready' \
          AND n.hetzner_location = $2 \
-         AND ( \
-             (n.labels->>'role') = 'builder' \
-             OR NOT EXISTS ( \
-                 SELECT 1 FROM nodes n2 \
-                 WHERE n2.workspace_id = $1 \
-                   AND n2.status = 'ready' \
-                   AND n2.hetzner_location = $2 \
-                   AND (n2.labels->>'role') = 'builder' \
-             ) \
-         ) \
+         AND n.node_role = 'builder' \
          GROUP BY n.id \
          ORDER BY n.created_at ASC",
     )
@@ -558,9 +521,8 @@ struct PendingDeployment {
     env_vars: BTreeMap<String, String>,
     ports: Vec<PortMap>,
     resources: Resources,
-    /// Service's registry_credential_id (if any). Threaded into the
-    /// PullAndRun payload so the agent's pull hits the CP auth proxy with
-    /// the right basic-auth creds.
+    /// Optional external registry credential for image services. Git-built
+    /// images use the backend-managed bundled registry credential instead.
     registry_credential_id: Option<String>,
 }
 
@@ -653,6 +615,7 @@ async fn pick_node(
            AND n.private_network_capable = TRUE \
            AND n.wireguard_public_key IS NOT NULL \
            AND n.wireguard_mesh_ip IS NOT NULL \
+           AND n.node_role <> 'builder' \
          GROUP BY n.id \
          ORDER BY n.created_at ASC",
     )
@@ -732,6 +695,7 @@ async fn pick_preferred_node_for_domains(
            AND n.private_network_capable = TRUE \
            AND n.wireguard_public_key IS NOT NULL \
            AND n.wireguard_mesh_ip IS NOT NULL \
+           AND n.node_role <> 'builder' \
          GROUP BY n.id",
     )
     .bind(workspace_id)
@@ -774,6 +738,7 @@ async fn pick_required_node_for_volume(
                AND n.private_network_capable = TRUE \
                AND n.wireguard_public_key IS NOT NULL \
                AND n.wireguard_mesh_ip IS NOT NULL \
+               AND n.node_role <> 'builder' \
              GROUP BY n.id",
         )
         .bind(workspace_id)
@@ -798,6 +763,7 @@ async fn pick_required_node_for_volume(
            AND n.wireguard_public_key IS NOT NULL \
            AND n.wireguard_mesh_ip IS NOT NULL \
            AND n.hetzner_location = $2 \
+           AND n.node_role <> 'builder' \
          GROUP BY n.id \
          ORDER BY n.created_at ASC",
     )
@@ -849,6 +815,7 @@ async fn existing_capacity_wait_reason(
          WHERE n.workspace_id = $1 \
            AND n.hetzner_location = $2 \
            AND n.status IN ('ready', 'provisioning') \
+           AND n.node_role <> 'builder' \
          GROUP BY n.id \
          ORDER BY CASE n.status WHEN 'ready' THEN 0 ELSE 1 END, n.created_at ASC",
     )
@@ -1064,6 +1031,7 @@ async fn place_and_run(state: &AppState, p: &PendingDeployment) -> Result<()> {
                 &p.workspace_id,
                 &p.resources,
                 Some(placement_location),
+                ProvisionPurpose::Runtime,
             )
             .await?;
             let reason = match outcome {
@@ -1147,36 +1115,14 @@ async fn dispatch_to_agent(
     volume: Option<&crate::volumes::VolumeRow>,
     private_network: Option<&crate::private_network::DeploymentPrivateNetwork>,
 ) -> Result<()> {
-    // If the service references a registry credential, validate it and thread
-    // only non-secret metadata plus the credential id into the persisted
-    // payload. The control plane hydrates the password in memory when the
-    // node claims the command.
-    let registry_cred = match &p.registry_credential_id {
-        Some(id) => Some(
-            credentials::fetch_decrypted(state.pool(), state.master_key(), &p.workspace_id, id)
-                .await
-                .context("fetching registry credential for pull")?
-                .ok_or_else(|| anyhow!("registry credential {id} missing"))?,
-        ),
-        None => None,
-    };
-    if let Some(c) = &registry_cred {
-        if c.kind != "registry" {
-            return Err(anyhow!("service credential is not a registry credential"));
-        }
-    }
-    let registry_auth = match (&p.registry_credential_id, registry_cred.as_ref()) {
-        (Some(id), Some(c)) => {
-            let url = c.metadata.get("url").and_then(|v| v.as_str());
-            let username = c.metadata.get("username").and_then(|v| v.as_str());
-            url.zip(username).map(|(url, username)| RegistryAuth {
-                url,
-                username,
-                credential_id: id,
-            })
-        }
-        _ => None,
-    };
+    let registry_auth_values = registry_auth_for_pull(state, p).await?;
+    let registry_auth = registry_auth_values
+        .as_ref()
+        .map(|(url, username, credential_id)| RegistryAuth {
+            url,
+            username,
+            credential_id,
+        });
 
     // Build the volume mount block (if any). The `device_path` follows
     // Hetzner's stable `/dev/disk/by-id/scsi-0HC_Volume_<id>` naming;
@@ -1234,11 +1180,51 @@ async fn dispatch_to_agent(
     Ok(())
 }
 
+async fn registry_auth_for_pull(
+    state: &AppState,
+    p: &PendingDeployment,
+) -> Result<Option<(String, String, String)>> {
+    if let Some(id) = &p.registry_credential_id {
+        let credential =
+            credentials::fetch_decrypted(state.pool(), state.master_key(), &p.workspace_id, id)
+                .await
+                .context("fetching registry credential for pull")?
+                .ok_or_else(|| anyhow!("registry credential {id} missing"))?;
+        if credential.kind != "registry" {
+            return Err(anyhow!("service credential is not a registry credential"));
+        }
+        let url = credential.metadata.get("url").and_then(|v| v.as_str());
+        let username = credential.metadata.get("username").and_then(|v| v.as_str());
+        return Ok(url
+            .zip(username)
+            .map(|(url, username)| (url.to_string(), username.to_string(), id.clone())));
+    }
+
+    if image_uses_bundled_registry(&p.image, state.config().registry_site.as_deref()) {
+        let registry = credentials::ensure_bundled_registry_credential(
+            state.pool(),
+            state.config(),
+            state.master_key(),
+            &p.workspace_id,
+        )
+        .await?;
+        return Ok(Some((registry.url, registry.username, registry.id)));
+    }
+
+    Ok(None)
+}
+
 /// Outcome of `try_provision_for`. `Skipped`/`Provisioning` land in the
 /// deployment's `reason` column so users can see why they're waiting.
 pub enum ProvisionOutcome {
     Provisioning,
     Skipped(String),
+}
+
+#[derive(Clone, Copy)]
+enum ProvisionPurpose {
+    Runtime,
+    Build,
 }
 
 /// Decide whether to provision a new Hetzner node for `need`. Returns the
@@ -1252,6 +1238,7 @@ async fn try_provision_for(
     workspace_id: &str,
     need: &Resources,
     location_override: Option<&str>,
+    purpose: ProvisionPurpose,
 ) -> Result<ProvisionOutcome> {
     #[derive(sea_orm::FromQueryResult)]
     struct WsSettings {
@@ -1338,6 +1325,7 @@ async fn try_provision_for(
     } else {
         hetzner_provisioner::NodeSize::Fit(need)
     };
+    let (node_role, idle_ttl_seconds) = provision_node_policy(purpose);
     let result = hetzner_provisioner::provision(
         state.pool(),
         state.config(),
@@ -1347,6 +1335,8 @@ async fn try_provision_for(
         location,
         node_size,
         ssh_key_ids,
+        node_role,
+        idle_ttl_seconds,
     )
     .await?;
     tracing::info!(
@@ -1356,6 +1346,13 @@ async fn try_provision_for(
         "provisioned hetzner node"
     );
     Ok(ProvisionOutcome::Provisioning)
+}
+
+fn provision_node_policy(purpose: ProvisionPurpose) -> (&'static str, Option<i32>) {
+    match purpose {
+        ProvisionPurpose::Runtime => ("runtime", None),
+        ProvisionPurpose::Build => ("builder", Some(BUILDER_IDLE_TTL_SECONDS as i32)),
+    }
 }
 
 /// Update `idle_since_at` on nodes: stamp when allocations first drop to zero; clear when non-zero.
@@ -1384,12 +1381,14 @@ async fn autoscale_down(state: &AppState) -> Result<()> {
         workspace_id: String,
         hetzner_server_id: Option<i64>,
         idle_since_at: Option<DateTime<Utc>>,
+        node_role: String,
+        idle_ttl_seconds: Option<i32>,
         ttl_seconds: i32,
     }
 
     let rows: Vec<Candidate> = crate::db::query_as(
         "SELECT n.id, n.workspace_id, n.hetzner_server_id, n.idle_since_at, \
-                w.autoscale_idle_ttl_seconds AS ttl_seconds \
+                n.node_role, n.idle_ttl_seconds, w.autoscale_idle_ttl_seconds AS ttl_seconds \
          FROM nodes n \
          JOIN workspaces w ON w.id = n.workspace_id \
          WHERE n.provider = 'hetzner' \
@@ -1405,7 +1404,8 @@ async fn autoscale_down(state: &AppState) -> Result<()> {
         let Some(idle_since) = c.idle_since_at else {
             continue;
         };
-        if (now - idle_since).num_seconds() < c.ttl_seconds as i64 {
+        let ttl_seconds = node_idle_ttl_seconds(&c.node_role, c.idle_ttl_seconds, c.ttl_seconds);
+        if (now - idle_since).num_seconds() < ttl_seconds {
             continue;
         }
         let Some(server_id) = c.hetzner_server_id else {
@@ -1427,6 +1427,20 @@ async fn autoscale_down(state: &AppState) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn node_idle_ttl_seconds(
+    node_role: &str,
+    idle_ttl_seconds: Option<i32>,
+    workspace_ttl_seconds: i32,
+) -> i64 {
+    if node_role == "builder" {
+        return idle_ttl_seconds
+            .map(i64::from)
+            .filter(|ttl| *ttl > 0)
+            .unwrap_or(BUILDER_IDLE_TTL_SECONDS);
+    }
+    workspace_ttl_seconds as i64
 }
 
 /// Enqueue an `update_routes` command for the given node with the current

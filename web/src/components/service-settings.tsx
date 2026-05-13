@@ -660,7 +660,7 @@ function GitSourceSection({
                 }
               }}
             >
-              <option value="">— manual URL / PAT fallback —</option>
+              <option value="">— manual URL —</option>
               {githubRepos.map((githubRepo) => (
                 <option key={githubRepoValue(githubRepo)} value={githubRepoValue(githubRepo)}>
                   {githubRepo.full_name}

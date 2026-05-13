@@ -98,7 +98,11 @@ async fn list(
 
     let rows: Vec<CredentialRow> = crate::db::query_as(
         "SELECT id, kind, name, metadata, created_at, updated_at, last_used_at \
-         FROM credentials WHERE workspace_id = $1 ORDER BY created_at DESC",
+         FROM credentials \
+         WHERE workspace_id = $1 \
+           AND kind <> 'github_pat' \
+           AND COALESCE(metadata->>'managed_by', '') <> 'driftbase' \
+         ORDER BY created_at DESC",
     )
     .bind(ctx.workspace_id.to_string())
     .fetch_all(state.pool())
@@ -141,6 +145,11 @@ async fn create(
             "Hetzner is configured by the Driftbase control plane".into(),
         ));
     }
+    if matches!(req.kind, CredentialKind::GithubPat) {
+        return Err(ApiError::Validation(
+            "GitHub PAT credentials are no longer supported; connect the GitHub App instead".into(),
+        ));
+    }
 
     let encrypted = state
         .master_key()
@@ -148,15 +157,10 @@ async fn create(
         .map_err(ApiError::Internal)?;
 
     let id = Id::new();
-    let mut metadata = req
+    let metadata = req
         .metadata
         .unwrap_or_else(|| JsonValue::Object(Default::default()));
 
-    // For bundled-registry credentials, the docker-login username must match
-    // the credential id so the auth proxy (crates/controlplane/src/
-    // registry_proxy) can look it up without guessing. Overwrite any
-    // user-supplied username to avoid cross-workspace collision. External
-    // registries (GHCR, Docker Hub, user-hosted) keep the user's value.
     if matches!(req.kind, CredentialKind::Registry) {
         if let Some(bundled) = state.config().registry_site.as_deref() {
             let is_bundled = metadata
@@ -165,10 +169,9 @@ async fn create(
                 .map(|u| registry_host_matches(u, bundled))
                 .unwrap_or(false);
             if is_bundled {
-                metadata
-                    .as_object_mut()
-                    .ok_or_else(|| ApiError::Validation("metadata must be an object".into()))?
-                    .insert("username".into(), JsonValue::String(id.to_string()));
+                return Err(ApiError::Validation(
+                    "Bundled registry credentials are managed by Driftbase".into(),
+                ));
             }
         }
     }
@@ -214,20 +217,50 @@ async fn rotate(
         return Err(ApiError::Validation("secret is required".into()));
     }
 
-    let existing: Option<(String,)> =
-        crate::db::query_tuple("SELECT kind FROM credentials WHERE id = $1 AND workspace_id = $2")
-            .bind(&id)
-            .bind(ctx.workspace_id.to_string())
-            .fetch_optional(state.pool())
-            .await?;
-    let (kind_str,) = existing.ok_or(ApiError::NotFound)?;
+    let existing: Option<(String, JsonValue)> = crate::db::query_tuple(
+        "SELECT kind, metadata FROM credentials WHERE id = $1 AND workspace_id = $2",
+    )
+    .bind(&id)
+    .bind(ctx.workspace_id.to_string())
+    .fetch_optional(state.pool())
+    .await?;
+    let (kind_str, existing_metadata) = existing.ok_or(ApiError::NotFound)?;
     let kind = CredentialKind::parse(&kind_str)
         .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("bad kind: {kind_str}")))?;
+    if existing_metadata
+        .get("managed_by")
+        .and_then(|v| v.as_str())
+        .is_some_and(|managed_by| managed_by == "driftbase")
+    {
+        return Err(ApiError::Forbidden(
+            "Managed credentials are handled by Driftbase".into(),
+        ));
+    }
 
     if matches!(kind, CredentialKind::HetznerApiToken) {
         return Err(ApiError::Forbidden(
             "Hetzner is configured by the Driftbase control plane".into(),
         ));
+    }
+    if matches!(kind, CredentialKind::GithubPat) {
+        return Err(ApiError::Validation(
+            "GitHub PAT credentials are no longer supported; connect the GitHub App instead".into(),
+        ));
+    }
+    if matches!(kind, CredentialKind::Registry) {
+        if let Some(bundled) = state.config().registry_site.as_deref() {
+            let metadata = req.metadata.as_ref().unwrap_or(&existing_metadata);
+            let is_bundled = metadata
+                .get("url")
+                .and_then(|v| v.as_str())
+                .map(|u| registry_host_matches(u, bundled))
+                .unwrap_or(false);
+            if is_bundled {
+                return Err(ApiError::Validation(
+                    "Bundled registry credentials are managed by Driftbase".into(),
+                ));
+            }
+        }
     }
 
     let encrypted = state
@@ -274,6 +307,24 @@ async fn delete(
 ) -> ApiResult<()> {
     let ctx = membership::resolve(state.pool(), &slug, &auth.user_id).await?;
     membership::require(&ctx, Role::Admin)?;
+
+    let existing: Option<(JsonValue,)> = crate::db::query_tuple(
+        "SELECT metadata FROM credentials WHERE id = $1 AND workspace_id = $2",
+    )
+    .bind(&id)
+    .bind(ctx.workspace_id.to_string())
+    .fetch_optional(state.pool())
+    .await?;
+    let (metadata,) = existing.ok_or(ApiError::NotFound)?;
+    if metadata
+        .get("managed_by")
+        .and_then(|v| v.as_str())
+        .is_some_and(|managed_by| managed_by == "driftbase")
+    {
+        return Err(ApiError::Forbidden(
+            "Managed credentials are handled by Driftbase".into(),
+        ));
+    }
 
     let res = crate::db::query("DELETE FROM credentials WHERE id = $1 AND workspace_id = $2")
         .bind(&id)

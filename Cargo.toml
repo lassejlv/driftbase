@@ -6,6 +6,7 @@ members = [
     "crates/hetzner",
     "crates/agent",
     "crates/controlplane",
+    "crates/migration",
 ]
 
 [workspace.package]
@@ -39,7 +40,7 @@ bincode = "1"
 
 # DB
 sea-orm = { version = "=1.1.14", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-postgres", "with-chrono", "with-json", "with-uuid"] }
-sea-orm-migration = { version = "=1.1.14", default-features = false, features = ["runtime-tokio-rustls", "sqlx-postgres", "with-chrono", "with-json", "with-uuid"] }
+sea-orm-migration = { version = "=1.1.14", default-features = false, features = ["runtime-tokio-rustls", "sqlx-postgres", "with-chrono", "with-json", "with-uuid", "cli"] }
 
 # Crypto / IDs
 argon2 = "0.5"
@@ -72,6 +73,7 @@ bollard = "0.17"
 driftbase-common = { path = "crates/common" }
 driftbase-proto = { path = "crates/proto" }
 driftbase-hetzner = { path = "crates/hetzner" }
+driftbase-migration = { path = "crates/migration" }
 
 [profile.release]
 lto = "thin"

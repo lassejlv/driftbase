@@ -519,6 +519,8 @@ async fn provision(
         &location,
         hetzner_provisioner::NodeSize::Explicit(&server_type),
         ssh_key_ids,
+        "runtime",
+        None,
     )
     .await
     .map_err(ApiError::Internal)?;

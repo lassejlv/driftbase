@@ -247,6 +247,8 @@ pub mod nodes {
         pub total_memory_mb: i32,
         pub total_disk_mb: i32,
         pub labels: Json,
+        pub node_role: String,
+        pub idle_ttl_seconds: Option<i32>,
         pub agent_version: Option<String>,
         pub last_seen_at: Option<DateTimeUtc>,
         pub created_at: DateTimeUtc,

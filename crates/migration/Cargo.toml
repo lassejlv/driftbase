@@ -1,0 +1,19 @@
+[package]
+name = "driftbase-migration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "driftbase_migration"
+path = "src/lib.rs"
+
+[[bin]]
+name = "driftbase-migration"
+path = "src/main.rs"
+
+[dependencies]
+sea-orm-migration.workspace = true
+tokio.workspace = true

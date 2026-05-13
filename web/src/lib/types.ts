@@ -38,7 +38,7 @@ export interface CreatedInvite extends InviteSummary {
   accept_url: string;
 }
 
-export type CredentialKind = 'github_pat' | 'registry';
+export type CredentialKind = 'registry';
 
 export interface CredentialSummary {
   id: string;
@@ -125,9 +125,6 @@ export interface ServiceSummary {
   dockerfile_path: string | null;
   root_dir: string | null;
   builder: ServiceBuilder;
-  registry_repo: string | null;
-  github_credential_id: string | null;
-  registry_credential_id: string | null;
   github_installation_id: number | null;
   github_repository_id: number | null;
   github_repository_full_name: string | null;

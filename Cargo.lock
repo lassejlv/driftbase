@@ -792,6 +792,7 @@ dependencies = [
  "dotenvy",
  "driftbase-common",
  "driftbase-hetzner",
+ "driftbase-migration",
  "driftbase-proto",
  "futures",
  "headers",
@@ -829,6 +830,14 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "driftbase-migration"
+version = "0.1.0"
+dependencies = [
+ "sea-orm-migration",
+ "tokio",
 ]
 
 [[package]]
@@ -2514,6 +2523,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da80ebcdb44571e86f03a2bdcb5532136a87397f366f38bbce64673fc5e6a450"
 dependencies = [
  "chrono",
+ "clap",
+ "dotenvy",
  "glob",
  "regex",
  "sea-schema",
@@ -2545,6 +2556,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "695e830a1332a4e3e57b5972eee00574a36060e1938afca7041a524e0955d5ba"
 dependencies = [
  "async-trait",
+ "clap",
+ "dotenvy",
  "sea-orm",
  "sea-orm-cli",
  "sea-schema",

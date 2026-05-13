@@ -27,7 +27,7 @@ pub async fn connect(database_url: &str) -> Result<Db> {
 pub async fn migrate(db: &Db) -> Result<()> {
     use sea_orm_migration::MigratorTrait;
 
-    crate::migration::Migrator::up(db, None)
+    driftbase_migration::Migrator::up(db, None)
         .await
         .context("running migrations")?;
     ensure_runtime_schema(db).await?;
@@ -35,7 +35,7 @@ pub async fn migrate(db: &Db) -> Result<()> {
 }
 
 pub async fn ensure_runtime_schema(db: &Db) -> Result<()> {
-    crate::migration::ensure_runtime_schema(db)
+    driftbase_migration::ensure_runtime_schema(db)
         .await
         .context("repairing runtime schema compatibility")?;
     Ok(())

@@ -22,7 +22,6 @@ mod domains;
 mod entity;
 mod error;
 mod github_app;
-mod migration;
 mod nodes;
 mod private_network;
 mod projects;

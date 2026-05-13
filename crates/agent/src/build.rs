@@ -29,7 +29,8 @@ pub struct BuildSpec {
     pub root_dir: String,
     pub image_tag: String,
     #[serde(default)]
-    pub github_pat: Option<String>,
+    #[serde(alias = "github_pat")]
+    pub github_token: Option<String>,
     #[serde(default)]
     pub registry: Option<RegistryAuth>,
 }
@@ -131,11 +132,11 @@ async fn do_build(
         .current_dir(work)
         .env_remove("GIT_ASKPASS")
         .env("GIT_TERMINAL_PROMPT", "0");
-    if let Some(pat) = spec.github_pat.as_deref() {
+    if let Some(token) = spec.github_token.as_deref() {
         if spec.git_repo.starts_with("http://") {
-            bail!("refusing to send PAT over plain http://");
+            bail!("refusing to send GitHub token over plain http://");
         }
-        clone.env("DRIFTBASE_GIT_TOKEN", pat);
+        clone.env("DRIFTBASE_GIT_TOKEN", token);
     }
     run_logged(
         client,

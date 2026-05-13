@@ -26,7 +26,7 @@ function NewWorkspacePage() {
     try {
       const ws = await create.mutateAsync({ slug, name });
       await navigate({
-        to: '/w/$workspaceSlug/onboarding',
+        to: '/w/$workspaceSlug',
         params: { workspaceSlug: ws.slug },
       });
     } catch (err) {

@@ -37,8 +37,7 @@ pub struct Config {
     /// provisioning through this local control-plane secret.
     pub managed_hetzner_api_token: Option<String>,
     /// GitHub App configuration for repository-backed builds. When unset the
-    /// legacy GitHub PAT path remains available, but GitHub App connect UI and
-    /// webhook processing are disabled.
+    /// GitHub App connect UI and webhook processing are disabled.
     pub github_app: Option<GitHubAppConfig>,
 }
 

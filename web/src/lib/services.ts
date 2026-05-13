@@ -88,9 +88,6 @@ export interface CreateServiceInput {
   dockerfile_path?: string;
   root_dir?: string;
   builder?: 'dockerfile' | 'railpack';
-  registry_repo?: string;
-  github_credential_id?: string;
-  registry_credential_id?: string;
   github_installation_id?: number;
   github_repository_id?: number;
   github_repository_full_name?: string;
@@ -127,9 +124,6 @@ export interface UpdateServiceInput {
   dockerfile_path?: string;
   root_dir?: string;
   builder?: 'dockerfile' | 'railpack';
-  registry_repo?: string;
-  github_credential_id?: string;
-  registry_credential_id?: string;
   github_installation_id?: number;
   github_repository_id?: number;
   github_repository_full_name?: string;
