@@ -210,6 +210,7 @@ export interface DomainSummary {
   last_error: string | null;
   last_cert_at: string | null;
   created_at: string;
+  edge_hostname: string;
   edge_ips: string[];
 }
 

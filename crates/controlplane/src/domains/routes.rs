@@ -37,6 +37,7 @@ pub struct DomainSummary {
     pub last_error: Option<String>,
     pub last_cert_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    pub edge_hostname: String,
     pub edge_ips: Vec<String>,
 }
 
@@ -53,7 +54,11 @@ struct DomainRow {
 }
 
 impl DomainSummary {
-    fn from_row(r: DomainRow, edge_ips: Vec<String>) -> Result<Self, ApiError> {
+    fn from_row(
+        r: DomainRow,
+        edge_hostname: String,
+        edge_ips: Vec<String>,
+    ) -> Result<Self, ApiError> {
         Ok(Self {
             id: r
                 .id
@@ -69,6 +74,7 @@ impl DomainSummary {
             last_error: r.last_error,
             last_cert_at: r.last_cert_at,
             created_at: r.created_at,
+            edge_hostname,
             edge_ips,
         })
     }
@@ -130,9 +136,10 @@ async fn list(
     .await?;
     let edge_ips =
         domains::edge_ips_for_workspace(state.pool(), &ctx.workspace_id.to_string()).await?;
+    let edge_hostname = state.config().edge_public_hostname.clone();
 
     rows.into_iter()
-        .map(|row| DomainSummary::from_row(row, edge_ips.clone()))
+        .map(|row| DomainSummary::from_row(row, edge_hostname.clone(), edge_ips.clone()))
         .collect::<Result<Vec<_>, _>>()
         .map(Json)
 }
@@ -190,7 +197,11 @@ async fn create(
 
     let edge_ips =
         domains::edge_ips_for_workspace(state.pool(), &ctx.workspace_id.to_string()).await?;
-    Ok(Json(DomainSummary::from_row(row, edge_ips)?))
+    Ok(Json(DomainSummary::from_row(
+        row,
+        state.config().edge_public_hostname.clone(),
+        edge_ips,
+    )?))
 }
 
 #[derive(Deserialize)]
@@ -242,7 +253,11 @@ async fn update(
 
     let edge_ips =
         domains::edge_ips_for_workspace(state.pool(), &ctx.workspace_id.to_string()).await?;
-    Ok(Json(DomainSummary::from_row(row, edge_ips)?))
+    Ok(Json(DomainSummary::from_row(
+        row,
+        state.config().edge_public_hostname.clone(),
+        edge_ips,
+    )?))
 }
 
 async fn retry(
@@ -299,7 +314,12 @@ async fn retry(
 
     let edge_ips =
         domains::edge_ips_for_workspace(state.pool(), &ctx.workspace_id.to_string()).await?;
-    DomainSummary::from_row(refreshed.unwrap_or(row), edge_ips).map(Json)
+    DomainSummary::from_row(
+        refreshed.unwrap_or(row),
+        state.config().edge_public_hostname.clone(),
+        edge_ips,
+    )
+    .map(Json)
 }
 
 async fn delete(

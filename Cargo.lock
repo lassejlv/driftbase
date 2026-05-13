@@ -820,6 +820,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "driftbase-edge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "clap",
+ "dotenvy",
+ "driftbase-common",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "driftbase-hetzner"
 version = "0.1.0"
 dependencies = [

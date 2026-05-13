@@ -81,3 +81,74 @@ runcmd:
 "#
     )
 }
+
+/// Render cloud-init for a global edge node. The edge image contains the Rust
+/// edge agent and Caddy; the container runs in host networking so it can own
+/// ports 80/443 and install WireGuard routes on the host network namespace.
+pub fn render_edge(
+    control_plane_url: &str,
+    bootstrap_token: &str,
+    edge_image: &str,
+    edge_node_id: &str,
+) -> String {
+    format!(
+        r#"#cloud-config
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - iproute2
+  - iptables
+  - wireguard-tools
+write_files:
+  - path: /etc/driftbase/edge.env
+    owner: root:root
+    permissions: '0600'
+    content: |
+      DRIFTBASE_CONTROL_PLANE_URL={control_plane_url}
+      DRIFTBASE_EDGE_BOOTSTRAP_TOKEN={bootstrap_token}
+      DRIFTBASE_EDGE_NODE_ID={edge_node_id}
+      DRIFTBASE_EDGE_IMAGE={edge_image}
+      DRIFTBASE_EDGE_NETWORK_DIR=/var/lib/driftbase/edge-network
+      DRIFTBASE_EDGE_CADDY_DIR=/var/lib/driftbase/edge-caddy
+  - path: /etc/systemd/system/driftbase-edge.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Driftbase global edge proxy
+      After=docker.service network-online.target
+      Wants=network-online.target
+      Requires=docker.service
+
+      [Service]
+      Type=simple
+      EnvironmentFile=/etc/driftbase/edge.env
+      ExecStartPre=-/usr/bin/docker rm -f driftbase-edge
+      ExecStartPre=/usr/bin/docker pull $DRIFTBASE_EDGE_IMAGE
+      ExecStartPre=/usr/bin/mkdir -p /var/lib/driftbase/edge-network
+      ExecStartPre=/usr/bin/mkdir -p /var/lib/driftbase/edge-caddy/data
+      ExecStartPre=/usr/bin/mkdir -p /var/lib/driftbase/edge-caddy/config
+      ExecStart=/usr/bin/docker run --rm --name driftbase-edge \
+        --network host \
+        --env-file /etc/driftbase/edge.env \
+        -v /etc/driftbase:/etc/driftbase \
+        -v /var/lib/driftbase/edge-network:/var/lib/driftbase/edge-network \
+        -v /var/lib/driftbase/edge-caddy/data:/data \
+        -v /var/lib/driftbase/edge-caddy/config:/config \
+        --cap-add=NET_ADMIN \
+        --security-opt apparmor=unconfined \
+        $DRIFTBASE_EDGE_IMAGE
+      ExecStop=/usr/bin/docker stop driftbase-edge
+      Restart=always
+      RestartSec=5s
+
+      [Install]
+      WantedBy=multi-user.target
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl daemon-reload
+  - systemctl enable --now driftbase-edge.service
+"#
+    )
+}

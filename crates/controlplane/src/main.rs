@@ -19,6 +19,7 @@ mod crypto;
 mod db;
 mod deployments;
 mod domains;
+mod edge;
 mod entity;
 mod error;
 mod github_app;
@@ -147,6 +148,7 @@ fn router(state: AppState) -> Router {
         .merge(nodes::routes::router())
         .merge(deployments::routes::router())
         .merge(domains::routes::router())
+        .merge(edge::routes::router())
         .merge(volumes::routes::router())
         .merge(agent::routes::router())
         .merge(console::routes::router())

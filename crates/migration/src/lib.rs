@@ -8,6 +8,8 @@ mod m20260513_000003_github_app_builds;
 mod m20260513_000004_repair_github_app_builds;
 #[path = "../migrations/m20260513_000005_build_first_nodes.rs"]
 mod m20260513_000005_build_first_nodes;
+#[path = "../migrations/m20260513_000006_global_edge_proxy.rs"]
+mod m20260513_000006_global_edge_proxy;
 mod migration;
 
 pub struct Migrator;
@@ -21,6 +23,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260513_000003_github_app_builds::AddGitHubAppBuildsSchema),
             Box::new(m20260513_000004_repair_github_app_builds::RepairGitHubAppBuildsSchema),
             Box::new(m20260513_000005_build_first_nodes::AddBuildFirstNodesSchema),
+            Box::new(m20260513_000006_global_edge_proxy::AddGlobalEdgeProxySchema),
         ]
     }
 }
@@ -30,6 +33,9 @@ pub async fn ensure_runtime_schema(db: &sea_orm::DatabaseConnection) -> Result<(
         db.execute_unprepared(statement).await?;
     }
     for statement in split_sql_statements(m20260513_000005_build_first_nodes::SQL) {
+        db.execute_unprepared(statement).await?;
+    }
+    for statement in split_sql_statements(m20260513_000006_global_edge_proxy::SQL) {
         db.execute_unprepared(statement).await?;
     }
     Ok(())
@@ -78,6 +84,7 @@ mod tests {
                 "m20260513_000003_github_app_builds",
                 "m20260513_000004_repair_github_app_builds",
                 "m20260513_000005_build_first_nodes",
+                "m20260513_000006_global_edge_proxy",
             ]
         );
     }

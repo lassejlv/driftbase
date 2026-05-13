@@ -5,6 +5,7 @@ members = [
     "crates/proto",
     "crates/hetzner",
     "crates/agent",
+    "crates/edge",
     "crates/controlplane",
     "crates/migration",
 ]

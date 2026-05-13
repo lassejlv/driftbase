@@ -69,6 +69,7 @@ export function DomainsSection({
   const retry = useRetryDomain(workspaceSlug, projectSlug, serviceSlug);
 
   const list = domains.data ?? [];
+  const edgeHostname = list[0]?.edge_hostname ?? 'edge.driftbase.app';
   const edgeIp =
     list.flatMap((domain) => domain.edge_ips).find((ip) => ip.length > 0) ?? null;
   const [addOpen, setAddOpen] = useState(false);
@@ -106,6 +107,7 @@ export function DomainsSection({
       {showAddCard ? (
         <AddDomainCard
           defaultPort={defaultPort}
+          edgeHostname={edgeHostname}
           edgeIp={edgeIp}
           onSubmit={async (body) => {
             await add.mutateAsync(body);
@@ -129,6 +131,7 @@ export function DomainsSection({
               key={d.id}
               domain={d}
               canManage={canManage}
+              edgeHostname={d.edge_hostname}
               edgeIp={d.edge_ips[0] ?? edgeIp}
               onUpdatePort={(port) =>
                 updateDomain.mutateAsync({ id: d.id, container_port: port })
@@ -149,11 +152,13 @@ export function DomainsSection({
 
 function AddDomainCard({
   defaultPort,
+  edgeHostname,
   edgeIp,
   pending,
   onSubmit,
 }: {
   defaultPort?: number | null;
+  edgeHostname: string;
   edgeIp: string | null;
   pending: boolean;
   onSubmit: (body: { hostname: string; container_port?: number }) => Promise<void>;
@@ -232,20 +237,26 @@ function AddDomainCard({
         </div>
       ) : null}
 
-      <DnsRecordPreview hostname={normalized} edgeIp={edgeIp} />
+      <DnsRecordPreview
+        hostname={normalized}
+        edgeHostname={edgeHostname}
+        edgeIp={edgeIp}
+      />
     </Card>
   );
 }
 
 function DnsRecordPreview({
   hostname,
+  edgeHostname,
   edgeIp,
 }: {
   hostname: string;
+  edgeHostname: string;
   edgeIp: string | null;
 }) {
   const recordName = dnsRecordName(hostname);
-  const ip = edgeIp ?? '—';
+  const apex = recordName === '@';
   const cloudflare = useCloudflareDetection(hostname);
 
   return (
@@ -255,21 +266,26 @@ function DnsRecordPreview({
         DNS record
       </div>
       <div className="grid grid-cols-[auto_auto_auto_auto_1fr_auto] items-center gap-x-3 gap-y-1 font-mono text-xs">
-        <DnsCell label="type" value="A" />
+        <DnsCell label="type" value={apex ? 'CNAME/ALIAS' : 'CNAME'} />
         <DnsCell label="name" value={recordName || '—'} copyable={recordName} />
-        <DnsCell label="value" value={ip} copyable={edgeIp ?? ''} />
+        <DnsCell label="value" value={edgeHostname} copyable={edgeHostname} />
         <DnsCell label="ttl" value="auto" />
       </div>
       <p className="mt-2 text-xs text-[var(--color-muted)]">
-        {edgeIp
-          ? 'Caddy issues TLS at the edge on the first HTTPS request. Propagation usually takes a minute.'
-          : 'Deploy the service first — an edge IP is needed before DNS can point anywhere.'}
+        {apex
+          ? `For apex domains, use ALIAS/ANAME or CNAME flattening to ${edgeHostname}. If your DNS provider cannot flatten CNAMEs, use A records to the shown edge IPs.`
+          : 'Caddy issues TLS at the edge on the first HTTPS request. Propagation usually takes a minute.'}
       </p>
+      {apex && edgeIp ? (
+        <p className="mt-1 font-mono text-[11px] text-[var(--color-muted)]">
+          A {recordName} → {edgeIp}
+        </p>
+      ) : null}
       {cloudflare.detected ? (
         <CloudflareConnect
           apex={cloudflare.apex}
           recordName={recordName}
-          nodeIp={edgeIp}
+          target={edgeHostname}
         />
       ) : null}
     </div>
@@ -301,6 +317,7 @@ function DnsCell({
 function DomainRow({
   domain,
   canManage,
+  edgeHostname,
   edgeIp,
   onUpdatePort,
   onRetry,
@@ -310,6 +327,7 @@ function DomainRow({
 }: {
   domain: DomainSummary;
   canManage: boolean;
+  edgeHostname: string;
   edgeIp: string | null;
   onUpdatePort: (port: number) => Promise<DomainSummary>;
   onRetry: () => void;
@@ -366,12 +384,20 @@ function DomainRow({
       {needsSetup || domain.last_error ? (
         <div className="mt-3 border-t border-[var(--color-border)] pt-3">
           {domain.tls_status === 'pending' ? (
-            <PendingHelp hostname={domain.hostname} edgeIp={edgeIp} />
+            <PendingHelp
+              hostname={domain.hostname}
+              edgeHostname={edgeHostname}
+              edgeIp={edgeIp}
+            />
           ) : null}
           {domain.tls_status === 'failed' && domain.last_error ? (
             <Stack gap={2}>
               <p className="text-xs text-red-400">{domain.last_error}</p>
-              <PendingHelp hostname={domain.hostname} edgeIp={edgeIp} />
+              <PendingHelp
+                hostname={domain.hostname}
+                edgeHostname={edgeHostname}
+                edgeIp={edgeIp}
+              />
             </Stack>
           ) : null}
         </div>
@@ -405,28 +431,35 @@ function RetryButton({
 
 function PendingHelp({
   hostname,
+  edgeHostname,
   edgeIp,
 }: {
   hostname: string;
+  edgeHostname: string;
   edgeIp: string | null;
 }) {
   const name = dnsRecordName(hostname);
-  const ip = edgeIp ?? '<your edge IP>';
+  const apex = name === '@';
   const cloudflare = useCloudflareDetection(hostname);
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[var(--color-muted)]">
         <span>Point DNS at the edge, then HTTPS issues the cert:</span>
         <span className="inline-flex items-center gap-1.5 rounded border border-[var(--color-border)] bg-black/[0.03] px-1.5 py-0.5 font-mono text-[var(--color-fg)] dark:bg-white/[0.03]">
-          A {name} → {ip}
+          {apex ? 'ALIAS/ANAME' : 'CNAME'} {name} → {edgeHostname}
         </span>
-        {edgeIp ? <CopyBtn value={edgeIp} /> : null}
+        <CopyBtn value={edgeHostname} />
       </div>
+      {apex && edgeIp ? (
+        <p className="font-mono text-[11px] text-[var(--color-muted)]">
+          Fallback: A {name} → {edgeIp}
+        </p>
+      ) : null}
       {cloudflare.detected ? (
         <CloudflareConnect
           apex={cloudflare.apex}
           recordName={name}
-          nodeIp={edgeIp}
+          target={edgeHostname}
         />
       ) : null}
     </div>
@@ -660,22 +693,20 @@ function apexDomain(host: string): string {
 function CloudflareConnect({
   apex,
   recordName,
-  nodeIp,
+  target,
 }: {
   apex: string;
   recordName: string;
-  nodeIp: string | null;
+  target: string;
 }) {
   const url = `https://dash.cloudflare.com/?to=/:account/${encodeURIComponent(apex)}/dns/records`;
   // Cloudflare doesn't accept deeplink params for new DNS records, so the
   // best we can do is land the user on the right zone's DNS page and copy
-  // the IP onto their clipboard so paste-into-content is one keystroke.
+  // the edge hostname onto their clipboard so paste-into-target is one keystroke.
   function handleConnect(e: React.MouseEvent<HTMLAnchorElement>) {
-    if (nodeIp) {
-      void navigator.clipboard.writeText(nodeIp).catch(() => {
-        // Clipboard API can fail in cross-origin iframes; the new tab still opens.
-      });
-    }
+    void navigator.clipboard.writeText(target).catch(() => {
+      // Clipboard API can fail in cross-origin iframes; the new tab still opens.
+    });
     // Let the default open-in-new-tab behavior run.
     void e;
   }
@@ -703,7 +734,7 @@ function CloudflareConnect({
       </div>
       <div className="mt-2.5 grid grid-cols-[auto_1fr_auto] items-center gap-x-3 gap-y-1 font-mono text-[11px]">
         <span className="text-[var(--color-muted)]">type</span>
-        <span className="text-[var(--color-fg)]">A</span>
+        <span className="text-[var(--color-fg)]">CNAME</span>
         <span />
 
         <span className="text-[var(--color-muted)]">name</span>
@@ -711,18 +742,18 @@ function CloudflareConnect({
         {recordName ? <CopyBtn value={recordName} /> : <span />}
 
         <span className="text-[var(--color-muted)]">content</span>
-        <span className="text-[var(--color-fg)]">{nodeIp ?? '—'}</span>
-        {nodeIp ? <CopyBtn value={nodeIp} /> : <span />}
+        <span className="text-[var(--color-fg)]">{target}</span>
+        <CopyBtn value={target} />
 
         <span className="text-[var(--color-muted)]">proxy</span>
         <span className="text-[var(--color-fg)]">DNS only (gray cloud)</span>
         <span />
       </div>
       <p className="mt-2 text-[11px] leading-relaxed text-[var(--color-muted)]">
-        Connect copies the IP to your clipboard. In Cloudflare, click{' '}
+        Connect copies the edge hostname to your clipboard. In Cloudflare, click{' '}
         <span className="font-mono text-[var(--color-fg)]">Add record</span>,
-        pick <span className="font-mono text-[var(--color-fg)]">A</span>, paste
-        the values above, and turn the orange cloud{' '}
+        pick <span className="font-mono text-[var(--color-fg)]">CNAME</span>, paste
+        the values above, and leave the orange cloud{' '}
         <span className="font-mono text-[var(--color-fg)]">off</span> so Caddy
         can issue its own cert.
       </p>

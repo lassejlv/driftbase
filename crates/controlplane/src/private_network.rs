@@ -194,6 +194,20 @@ pub async fn sync_workspace(pool: &DatabaseConnection, workspace_id: &str) -> Re
     Ok(())
 }
 
+pub async fn sync_all_workspaces(pool: &DatabaseConnection) -> Result<()> {
+    let rows: Vec<(String,)> = crate::db::query_tuple(
+        "SELECT DISTINCT workspace_id \
+         FROM nodes \
+         WHERE status = 'ready' AND private_network_capable = TRUE",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (workspace_id,) in rows {
+        sync_workspace(pool, &workspace_id).await?;
+    }
+    Ok(())
+}
+
 async fn ensure_project_network_row(
     pool: &DatabaseConnection,
     project_id: &str,
@@ -401,7 +415,7 @@ async fn build_sync_payload(
             .fetch_all(pool)
             .await?;
 
-    let peers = nodes
+    let mut peers = nodes
         .iter()
         .filter(|node| node.id != target.id)
         .filter_map(|node| {
@@ -424,6 +438,20 @@ async fn build_sync_payload(
             }))
         })
         .collect::<Vec<_>>();
+
+    let edge_peers = crate::edge::ready_peers(pool).await?;
+    peers.extend(edge_peers.into_iter().filter_map(|edge| {
+        let public_key = edge.wireguard_public_key?;
+        let mesh_ip = edge.wireguard_mesh_ip?;
+        let public_ipv4 = edge.public_ipv4?;
+        Some(json!({
+            "node_id": edge.id,
+            "public_key": public_key,
+            "endpoint": format!("{public_ipv4}:{}", edge.wireguard_listen_port),
+            "allowed_ips": [format!("{mesh_ip}/32")],
+            "persistent_keepalive_seconds": 25,
+        }))
+    }));
 
     let projects: Vec<ProjectSyncRow> = crate::db::query_as(
         "SELECT p.id AS project_id, pn.cidr, pn.domain, \

@@ -61,6 +61,47 @@ export interface AgentUpdateResponse {
   command_id: string | null;
 }
 
+export interface AdminEdgeOverview {
+  edge_hostname: string;
+  edge_ips: string[];
+  route_count: number;
+  regions: AdminEdgeRegion[];
+}
+
+export interface AdminEdgeRegion {
+  id: string;
+  name: string;
+  provider: string;
+  location: string;
+  server_type: string;
+  desired_nodes: number;
+  status: string;
+  created_at: string;
+  nodes: AdminEdgeNode[];
+}
+
+export interface AdminEdgeNode {
+  id: string;
+  region_id: string;
+  name: string;
+  provider: string;
+  status: string;
+  public_ipv4: string | null;
+  hetzner_location: string | null;
+  hetzner_server_type: string | null;
+  wireguard_mesh_ip: string | null;
+  agent_version: string | null;
+  route_count: number;
+  caddy_synced_at: string | null;
+  caddy_sync_error: string | null;
+  private_network_synced_at: string | null;
+  private_network_sync_error: string | null;
+  last_error: string | null;
+  last_seen_at: string | null;
+  registered_at: string | null;
+  created_at: string;
+}
+
 export const adminOverviewQuery = queryOptions({
   queryKey: ['admin', 'overview'] as const,
   queryFn: ({ signal }) => api<AdminOverview>('/admin/overview', { signal }),
@@ -74,6 +115,11 @@ export const adminNodesQuery = queryOptions({
 export const adminUsersQuery = queryOptions({
   queryKey: ['admin', 'users'] as const,
   queryFn: ({ signal }) => api<AdminUser[]>('/admin/users', { signal }),
+});
+
+export const adminEdgeQuery = queryOptions({
+  queryKey: ['admin', 'edge'] as const,
+  queryFn: ({ signal }) => api<AdminEdgeOverview>('/admin/edge/regions', { signal }),
 });
 
 export function useApproveUser() {
@@ -147,6 +193,56 @@ export function useAdminDeleteNode() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['admin', 'nodes'] });
       qc.invalidateQueries({ queryKey: ['admin', 'overview'] });
+    },
+  });
+}
+
+export function useAdminCreateEdgeRegion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { name?: string; location: string; server_type?: string }) =>
+      api<{ region_id: string; edge_node_id: string; hetzner_server_id: number }>(
+        '/admin/edge/regions',
+        { method: 'POST', body: input },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['admin', 'edge'] });
+      qc.invalidateQueries({ queryKey: ['admin', 'overview'] });
+    },
+  });
+}
+
+export function useAdminDisableEdgeRegion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      api<void>(`/admin/edge/regions/${encodeURIComponent(id)}/disable`, { method: 'POST' }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['admin', 'edge'] });
+    },
+  });
+}
+
+export function useAdminDrainEdgeNode() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      api<void>(`/admin/edge/nodes/${encodeURIComponent(id)}/drain`, { method: 'POST' }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['admin', 'edge'] });
+    },
+  });
+}
+
+export function useAdminDeleteEdgeNode() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      api<void>(`/admin/edge/nodes/${encodeURIComponent(id)}?force=true`, {
+        method: 'DELETE',
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['admin', 'edge'] });
     },
   });
 }

@@ -107,6 +107,7 @@ pub async fn edge_ips_for_workspace(
     pool: &DatabaseConnection,
     workspace_id: &str,
 ) -> Result<Vec<String>> {
+    let mut ips = crate::edge::public_ips(pool).await?;
     let rows: Vec<(String,)> = crate::db::query_tuple(
         "SELECT public_ipv4 \
          FROM nodes \
@@ -119,7 +120,12 @@ pub async fn edge_ips_for_workspace(
     .bind(workspace_id)
     .fetch_all(pool)
     .await?;
-    Ok(rows.into_iter().map(|(ip,)| ip).collect())
+    for (ip,) in rows {
+        if !ips.iter().any(|existing| existing == &ip) {
+            ips.push(ip);
+        }
+    }
+    Ok(ips)
 }
 
 pub fn validate_hostname(h: &str) -> Result<(), String> {

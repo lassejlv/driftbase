@@ -50,7 +50,15 @@ function AdminDashboard() {
     <Stack gap={6}>
       <PageHeader
         title="Admin"
-        subtitle="Platform operations across workspaces, nodes, deployments, and users."
+        subtitle={
+          <>
+            Platform operations across workspaces, nodes, deployments, users, and{' '}
+            <Link to="/admin/edge" className="hover:text-[var(--color-fg)]">
+              edge regions
+            </Link>
+            .
+          </>
+        }
       />
 
       <div className="grid gap-3 md:grid-cols-4">
